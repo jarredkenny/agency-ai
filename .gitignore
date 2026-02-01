@@ -1,0 +1,47 @@
+# Agent-specific files - DO NOT SYNC
+IDENTITY.md
+
+# Memory is ephemeral - ignore all contents, keep folder
+memory/*
+!memory/.gitkeep
+
+# Task tracking (worker-specific)
+.task-threads.json
+
+# Beads local SQLite database (regenerated from JSONL)
+.beads/beads.db
+.beads/beads.db-*
+.beads/daemon.*
+.beads/bd.sock*
+.beads/last-touched
+.beads/sync-state.json
+
+# NOTE: issues.jsonl, interactions.jsonl, metadata.json ARE tracked for shared state
+
+# Fleet config (contains secrets — use fleet.example.json as template)
+fleet.json
+docker-compose.agents.yml
+.env
+.env.*
+
+# Node modules and build artifacts
+node_modules/
+dist/
+*.log
+logs/
+pnpm-lock.yaml
+
+# Editor files
+.vscode/
+*.swp
+*.swo
+
+# bv (beads viewer) local config and caches
+.bv/
+
+# Backup files
+*.backup
+
+agency.db
+agency.db-shm
+agency.db-wal

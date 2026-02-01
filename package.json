@@ -1,0 +1,33 @@
+{
+  "name": "@jx0/agency",
+  "version": "0.1.0",
+  "type": "module",
+  "bin": {
+    "agency": "./bin/agency.js"
+  },
+  "files": [
+    "bin/",
+    "src/",
+    "dashboard/.next/standalone/",
+    "dashboard/.next/static/",
+    "dashboard/public/",
+    "src/templates/"
+  ],
+  "scripts": {
+    "dev": "bun run src/daemon.ts",
+    "build": "cd dashboard && next build",
+    "prepublishOnly": "bun run build",
+    "prepare": "bun link"
+  },
+  "dependencies": {
+    "hono": "^4.7.0",
+    "kysely": "^0.27.0",
+    "kysely-bun-sqlite": "^0.4.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.3"
+  },
+  "engines": {
+    "bun": ">=1.0.0"
+  }
+}
