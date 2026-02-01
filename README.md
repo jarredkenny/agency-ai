@@ -27,6 +27,8 @@ A scalable orchestrator + worker architecture for autonomous AI software develop
               └──────────┘ └──────────┘ └──────────┘
 ```
 
+![Mission Control](docs/images/agency_ui_mission_control.png)
+
 ## Install
 
 ```bash
@@ -54,93 +56,14 @@ agency daemon install
 agency daemon start
 ```
 
-Dashboard at `http://localhost:3001`, API at `http://localhost:3100`.
+Dashboard and API both served at `http://localhost:3100`.
 
 ## Stack
 
 | Component | Tech | Port |
 |-----------|------|------|
-| **API** | Hono + Kysely + SQLite (Bun) | 3100 |
-| **Dashboard** | Next.js 15 + React 19 + Tailwind 4 | 3001 |
+| **API + Dashboard** | Hono + Kysely + SQLite (Bun) + Next.js static export | 3100 |
 | **CLI** | TypeScript (Bun) | — |
-
-## Project Structure
-
-```
-@jx0/agency
-├── bin/agency.js              # CLI entry point (#!/usr/bin/env bun)
-├── src/
-│   ├── cli/
-│   │   ├── index.ts           # Command dispatcher
-│   │   ├── commands/          # One file per command
-│   │   │   ├── init.ts        # Interactive project setup
-│   │   │   ├── ps.ts          # List agents
-│   │   │   ├── start.ts       # Start agent
-│   │   │   ├── stop.ts        # Stop agent
-│   │   │   ├── logs.ts        # Tail agent logs
-│   │   │   ├── ssh.ts         # SSH into agent
-│   │   │   ├── tasks.ts       # Task CRUD
-│   │   │   ├── msg.ts         # Task comments
-│   │   │   ├── learn.ts       # Store knowledge
-│   │   │   ├── recall.ts      # Search knowledge
-│   │   │   ├── doc.ts         # Documents
-│   │   │   ├── daemon.ts      # Service management
-│   │   │   ├── status.ts      # Health check
-│   │   │   ├── config.ts      # Settings
-│   │   │   └── skills.ts      # Skills CRUD
-│   │   └── lib/
-│   │       ├── find-root.ts   # Walk up to find .agency/
-│   │       ├── api.ts         # HTTP client
-│   │       ├── config.ts      # CLI config
-│   │       └── prompt.ts      # Interactive prompts
-│   ├── api/
-│   │   ├── index.ts           # Hono app
-│   │   ├── routes/            # REST endpoints
-│   │   │   ├── agents.ts
-│   │   │   ├── tasks.ts
-│   │   │   ├── messages.ts
-│   │   │   ├── notifications.ts
-│   │   │   ├── activities.ts
-│   │   │   ├── documents.ts
-│   │   │   ├── knowledge.ts
-│   │   │   ├── settings.ts
-│   │   │   ├── skills.ts
-│   │   │   └── role-configs.ts
-│   │   ├── db/
-│   │   │   ├── client.ts      # SQLite via Kysely
-│   │   │   ├── types.ts
-│   │   │   ├── migrate.ts
-│   │   │   ├── seed.ts
-│   │   │   └── migrations/
-│   │   │       ├── 001_initial.ts
-│   │   │       └── 002_configs.ts
-│   │   └── lib/
-│   │       ├── activity.ts
-│   │       ├── fleet-sync.ts
-│   │       ├── mentions.ts
-│   │       ├── processes.ts
-│   │       └── resolve-agent.ts
-│   ├── daemon.ts              # Starts API + dashboard
-│   └── templates/             # Defaults seeded on init
-│       ├── soul.md
-│       ├── user.md
-│       ├── memory.md
-│       ├── heartbeat-orchestrator.md
-│       ├── heartbeat-implementer.md
-│       ├── agents-config-orchestrator.md
-│       ├── agents-config-implementer.md
-│       ├── tools-orchestrator.md
-│       ├── tools-implementer.md
-│       ├── agents-orchestrator.md
-│       ├── agents-implementer.md
-│       └── environment.md
-├── dashboard/                 # Next.js app (output: standalone)
-│   └── src/
-│       ├── app/
-│       ├── components/
-│       └── lib/api.ts
-└── package.json               # @jx0/agency
-```
 
 ## `.agency/` Directory
 
@@ -155,6 +78,8 @@ Created by `agency init`. This is the only directory Agency writes to in your pr
 Everything else — settings, skills, role configs — lives in the database, editable via the dashboard or CLI.
 
 ## CLI Reference
+
+![agency ps](docs/images/agency_cli_ps.png)
 
 ```
 agency init                          Set up .agency/ in current directory
@@ -236,9 +161,20 @@ Five views accessible from the top nav:
 
 - **Mission Control** — Agent roster + task kanban board + live activity feed
 - **Agent Config** — Browse agent workspace files (served from role_configs in DB)
-- **Settings** — Key-value editor grouped by category (General, Slack, AWS, SSH)
+- **Settings** — Categorized editor for Identity, AI Provider, AWS, and SSH configuration
 - **Skills** — Markdown editor for team skills
 - **Roles** — Markdown editor for role configs (Heartbeat, Tools, Agents, etc.)
+
+![Agent Config](docs/images/agent_ui_agent_config.png)
+
+### Settings
+
+Sensitive values (API keys, SSH keys, credentials) are masked in the API and revealed on demand in the UI. AI provider settings support both direct API key entry and Claude Max OAuth (import tokens from Claude Code with one click).
+
+| | |
+|---|---|
+| ![Identity](docs/images/agency_ui_identity_settings.png) | ![AI Provider](docs/images/agency_ui_ai_prodivder_settings.png) |
+| ![AWS](docs/images/agency_ui_aws_settings.png) | |
 
 ## How It Works
 

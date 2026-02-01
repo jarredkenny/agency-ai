@@ -8,9 +8,15 @@ if (agencyRoot) {
   process.env.FLEET_PATH ??= path.join(agencyRoot, "fleet.json");
 }
 
-// Start API server (in-process via Bun's default export)
+// Start API server explicitly (Bun auto-serve only works for main entry)
 console.log("[daemon] starting API server...");
-await import("./api/index.js");
+const apiModule = await import("./api/index.js");
+const server = Bun.serve({
+  port: apiModule.default.port,
+  hostname: apiModule.default.hostname,
+  fetch: apiModule.default.fetch,
+});
+console.log(`[daemon] API listening on http://${server.hostname}:${server.port}`);
 
 // Run migrations on startup
 const { runMigrations } = await import("./api/db/migrate.js");
@@ -47,46 +53,9 @@ function spawnChild(name: string, cmd: string[], cwd: string) {
   };
 }
 
-// Find the dashboard directory — could be relative to package or in project
-const possibleDashboardPaths = [
-  path.resolve(import.meta.dir, "../dashboard"),
-  path.resolve(process.cwd(), "dashboard"),
-];
-
-let dashboardDir: string | null = null;
-for (const p of possibleDashboardPaths) {
-  const standalonePath = path.join(p, ".next/standalone/server.js");
-  const pkgPath = path.join(p, "package.json");
-  if (Bun.file(standalonePath).size > 0 || Bun.file(pkgPath).size > 0) {
-    dashboardDir = p;
-    break;
-  }
-}
-
 const children: { kill(): void }[] = [];
 
-if (dashboardDir) {
-  const standalonePath = path.join(dashboardDir, ".next/standalone/server.js");
-  if (await Bun.file(standalonePath).exists()) {
-    // Use standalone build
-    children.push(
-      spawnChild(
-        "dashboard",
-        ["node", standalonePath],
-        dashboardDir
-      )
-    );
-  } else {
-    // Dev mode — use next start
-    children.push(
-      spawnChild(
-        "dashboard",
-        ["bun", "next", "start", "-p", "3001"],
-        dashboardDir
-      )
-    );
-  }
-}
+// Dashboard is now served as static files from the API process — no child needed.
 
 // Only spawn notify if it exists
 const notifyEntry = path.resolve(import.meta.dir, "../packages/notify/src/index.ts");

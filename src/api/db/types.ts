@@ -101,6 +101,8 @@ export interface SettingsTable {
   value: string;
   category: string;
   description: string | null;
+  sensitive: number;
+  input_type: string;
   updated_at: Generated<string>;
 }
 

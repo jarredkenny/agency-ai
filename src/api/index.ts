@@ -1,5 +1,7 @@
 import { Hono } from "hono";
 import { cors } from "hono/cors";
+import { serveStatic } from "hono/bun";
+import * as path from "path";
 import { reconcileDbFromFleet, startWatcher } from "./lib/fleet-sync.js";
 import { agents } from "./routes/agents.js";
 import { tasks } from "./routes/tasks.js";
@@ -9,6 +11,7 @@ import { activities } from "./routes/activities.js";
 import { documents } from "./routes/documents.js";
 import { knowledge } from "./routes/knowledge.js";
 import { settings } from "./routes/settings.js";
+import { oauth } from "./routes/oauth.js";
 import { skills } from "./routes/skills.js";
 import { roleConfigs } from "./routes/role-configs.js";
 
@@ -37,8 +40,26 @@ app.route("/activities", activities);
 app.route("/documents", documents);
 app.route("/knowledge", knowledge);
 app.route("/settings", settings);
+app.route("/oauth", oauth);
 app.route("/skills", skills);
 app.route("/role-configs", roleConfigs);
+
+// Serve the dashboard static export
+const dashboardPaths = [
+  path.resolve(import.meta.dir, "../../dashboard/out"),
+  path.resolve(process.cwd(), "dashboard/out"),
+];
+const dashboardDir = dashboardPaths.find((p) => {
+  try { return Bun.file(path.join(p, "index.html")).size > 0; } catch { return false; }
+});
+
+if (dashboardDir) {
+  app.use("/assets/*", serveStatic({ root: dashboardDir }));
+  app.use("/_next/*", serveStatic({ root: dashboardDir }));
+  app.get("/", serveStatic({ root: dashboardDir, path: "/index.html" }));
+  // Fallback: serve index.html for any non-API route (SPA routing)
+  app.use("*", serveStatic({ root: dashboardDir, rewriteRequestPath: () => "/index.html" }));
+}
 
 // Reconcile fleet.json → DB on startup, then watch for changes
 reconcileDbFromFleet()
