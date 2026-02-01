@@ -29,7 +29,7 @@ A scalable orchestrator + worker architecture for autonomous AI software develop
               └──────────┘ └──────────┘ └──────────┘
 ```
 
-![Mission Control](docs/images/agency_ui_mission_control.png)
+![Mission Control](https://raw.githubusercontent.com/jarredkenny/agency-ai/main/docs/images/agency_ui_mission_control.png)
 
 ## Install
 
@@ -81,7 +81,7 @@ Everything else — settings, skills, role configs — lives in the database, ed
 
 ## CLI Reference
 
-![agency ps](docs/images/agency_cli_ps.png)
+![agency ps](https://raw.githubusercontent.com/jarredkenny/agency-ai/main/docs/images/agency_cli_ps.png)
 
 ```
 agency init                          Set up .agency/ in current directory
@@ -167,7 +167,7 @@ Five views accessible from the top nav:
 - **Skills** — Markdown editor for team skills
 - **Roles** — Markdown editor for role configs (Heartbeat, Tools, Agents, etc.)
 
-![Agent Config](docs/images/agent_ui_agent_config.png)
+![Agent Config](https://raw.githubusercontent.com/jarredkenny/agency-ai/main/docs/images/agent_ui_agent_config.png)
 
 ### Settings
 
@@ -175,8 +175,8 @@ Sensitive values (API keys, SSH keys, credentials) are masked in the API and rev
 
 | | |
 |---|---|
-| ![Identity](docs/images/agency_ui_identity_settings.png) | ![AI Provider](docs/images/agency_ui_ai_prodivder_settings.png) |
-| ![AWS](docs/images/agency_ui_aws_settings.png) | |
+| ![Identity](https://raw.githubusercontent.com/jarredkenny/agency-ai/main/docs/images/agency_ui_identity_settings.png) | ![AI Provider](https://raw.githubusercontent.com/jarredkenny/agency-ai/main/docs/images/agency_ui_ai_prodivder_settings.png) |
+| ![AWS](https://raw.githubusercontent.com/jarredkenny/agency-ai/main/docs/images/agency_ui_aws_settings.png) | |
 
 ## How It Works
 
