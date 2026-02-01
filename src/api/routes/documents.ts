@@ -39,3 +39,19 @@ documents.post("/", async (c) => {
   await logActivity("document_created", agent.id, `Created doc: ${doc.title}`, doc.task_id);
   return c.json(doc, 201);
 });
+
+documents.put("/:id", async (c) => {
+  const id = c.req.param("id");
+  const body = await c.req.json<{ title?: string; content?: string; doc_type?: string }>();
+
+  const existing = await db.selectFrom("documents").where("id", "=", id).selectAll().executeTakeFirst();
+  if (!existing) return c.json({ error: "not found" }, 404);
+
+  const updated = await db.updateTable("documents").set({
+    ...(body.title !== undefined && { title: body.title }),
+    ...(body.content !== undefined && { content: body.content }),
+    ...(body.doc_type !== undefined && { doc_type: body.doc_type }),
+  }).where("id", "=", id).returningAll().executeTakeFirstOrThrow();
+
+  return c.json(updated);
+});

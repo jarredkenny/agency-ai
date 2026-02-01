@@ -10,6 +10,8 @@ import { AgentConfig } from "@/components/agent-config";
 import { SettingsEditor } from "@/components/settings-editor";
 import { SkillsEditor } from "@/components/skills-editor";
 import { RoleConfigEditor } from "@/components/role-config-editor";
+import { KnowledgeEditor } from "@/components/knowledge-editor";
+import { DocumentsEditor } from "@/components/documents-editor";
 
 export default function Home() {
   const [view, setView] = useState<View>("mission");
@@ -39,6 +41,10 @@ export default function Home() {
         <SkillsEditor />
       ) : view === "roles" ? (
         <RoleConfigEditor />
+      ) : view === "knowledge" ? (
+        <KnowledgeEditor />
+      ) : view === "documents" ? (
+        <DocumentsEditor />
       ) : null}
     </div>
   );

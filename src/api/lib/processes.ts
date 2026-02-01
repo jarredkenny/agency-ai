@@ -1,4 +1,5 @@
 import type { Subprocess } from "bun";
+import { db } from "../db/client.js";
 
 const localProcesses = new Map<string, Subprocess>();
 
@@ -22,11 +23,13 @@ export function startLocal(name: string, role: string): Subprocess {
 
   localProcesses.set(name, proc);
 
-  // Clean up map entry when process exits
-  proc.exited.then(() => {
+  // Clean up map entry and update DB status when process exits
+  proc.exited.then((code) => {
     if (localProcesses.get(name) === proc) {
       localProcesses.delete(name);
     }
+    console.log(`[process] ${name} exited with code ${code}`);
+    db.updateTable("agents").set({ status: "idle" }).where("name", "=", name).execute().catch(console.error);
   });
 
   return proc;

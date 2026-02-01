@@ -10,7 +10,7 @@ interface Notification {
   created_at: string;
 }
 
-export type View = "mission" | "config" | "settings" | "skills" | "roles";
+export type View = "mission" | "config" | "settings" | "skills" | "roles" | "knowledge" | "documents";
 
 interface HeaderProps {
   activeView: View;
@@ -23,6 +23,8 @@ const NAV_ITEMS: { key: View; label: string }[] = [
   { key: "settings", label: "Settings" },
   { key: "skills", label: "Skills" },
   { key: "roles", label: "Roles" },
+  { key: "knowledge", label: "Knowledge" },
+  { key: "documents", label: "Docs" },
 ];
 
 export function Header({ activeView, onViewChange }: HeaderProps) {

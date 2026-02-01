@@ -137,6 +137,7 @@ agency --version                     Show version
 | GET | `/notifications/pending/:agent` | Pending notifications |
 | GET/POST | `/knowledge` | Knowledge base |
 | GET/POST | `/documents` | Documents |
+| GET/PUT | `/documents/:id` | Document details/update |
 | GET/PUT/DELETE | `/settings` | Settings (key-value) |
 | GET/POST/PUT/DELETE | `/skills` | Skills (markdown docs) |
 | GET/PUT/DELETE | `/role-configs/:role/:type` | Role configuration docs |
@@ -159,13 +160,15 @@ All state lives in `.agency/agency.db` (SQLite):
 
 ## Dashboard
 
-Five views accessible from the top nav:
+Seven views accessible from the top nav:
 
 - **Mission Control** — Agent roster + task kanban board + live activity feed
 - **Agent Config** — Browse agent workspace files (served from role_configs in DB)
 - **Settings** — Categorized editor for Identity, AI Provider, AWS, and SSH configuration
 - **Skills** — Markdown editor for team skills
 - **Roles** — Markdown editor for role configs (Heartbeat, Tools, Agents, etc.)
+- **Knowledge** — Key-value knowledge base editor with tag filtering and search
+- **Docs** — Document editor for creating and managing team documents
 
 ![Agent Config](https://raw.githubusercontent.com/jarredkenny/agency-ai/main/docs/images/agent_ui_agent_config.png)
 
@@ -177,6 +180,34 @@ Sensitive values (API keys, SSH keys, credentials) are masked in the API and rev
 |---|---|
 | ![Identity](https://raw.githubusercontent.com/jarredkenny/agency-ai/main/docs/images/agency_ui_identity_settings.png) | ![AI Provider](https://raw.githubusercontent.com/jarredkenny/agency-ai/main/docs/images/agency_ui_ai_prodivder_settings.png) |
 | ![AWS](https://raw.githubusercontent.com/jarredkenny/agency-ai/main/docs/images/agency_ui_aws_settings.png) | |
+
+### Skills
+
+Sidebar + editor view for managing team skills as markdown documents. Skills are injected into agent prompts to teach them specific capabilities or workflows. Each skill has a name, category, tags, and a markdown body. Create, edit, search, and delete skills directly from the dashboard.
+
+### Roles
+
+Editor for role configuration documents. Each agent role (e.g. orchestrator, implementer) has a set of config types — Heartbeat, Tools, Agents, Soul, Identity — that control how agents behave. Select a role and config type from the sidebar to edit the markdown content.
+
+### Knowledge
+
+Key-value knowledge base editor. Agents and humans store learned facts and context as knowledge entries, each with a unique key, content body, and tags. The sidebar supports search (filters by key and content) and tag display. Create new entries inline, edit content and tags, and save — entries are upserted by key.
+
+CLI equivalent:
+```bash
+agency learn "postgres needs --lock-timeout 5s" --tags postgres,ops
+agency recall "postgres"
+```
+
+### Docs
+
+Document editor for creating and managing team documents. Documents have a title, content body, and type label. Create new documents from the sidebar, edit title/content/type in the editor panel, and save. Documents serve as an audit trail — there is no delete.
+
+CLI equivalent:
+```bash
+agency doc create "Architecture Decision Record" --type adr < content.md
+agency doc show <id>
+```
 
 ## How It Works
 
