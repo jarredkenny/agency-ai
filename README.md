@@ -1,6 +1,6 @@
 # Agency — Multi-Agent AI Development Platform
 
-A scalable orchestrator + worker architecture for autonomous AI software development. Agents coordinate through a central API, communicate via task comments, and execute work through Claude Code sessions.
+A scalable orchestrator + worker architecture for autonomous AI software development. Built on top of [OpenClaw](https://openclaw.ai/) ([GitHub](https://github.com/openclaw/openclaw)) — each deployed agent is an OpenClaw instance with full shell access, file I/O, and browser control. Agency adds the coordination layer: task assignment, inter-agent messaging, role-based configuration, and a dashboard to manage it all.
 
 ```
                          ┌──────────────┐
@@ -11,6 +11,7 @@ A scalable orchestrator + worker architecture for autonomous AI software develop
                                 ▼
                     ┌───────────────────────┐
                     │     Orchestrator      │
+                    │    (OpenClaw agent)   │
                     │                       │
                     │  Investigates → Plans  │
                     │  Creates tasks → Delegates
@@ -20,6 +21,7 @@ A scalable orchestrator + worker architecture for autonomous AI software develop
                     ▼           ▼           ▼
               ┌──────────┐ ┌──────────┐ ┌──────────┐
               │ Worker A │ │ Worker B │ │ Worker C │
+              │ (OpenClaw)│ │(OpenClaw)│ │(OpenClaw)│
               │          │ │          │ │          │
               │ Claims → │ │          │ │          │
               │ Codes  → │ │   ...    │ │   ...    │
@@ -177,6 +179,50 @@ Sensitive values (API keys, SSH keys, credentials) are masked in the API and rev
 | ![AWS](docs/images/agency_ui_aws_settings.png) | |
 
 ## How It Works
+
+### Agents
+
+Every agent in Agency is an [OpenClaw](https://openclaw.ai/) instance. OpenClaw provides the core capabilities — shell access, file I/O, browser control, persistent memory, and multi-model support. Agency layers on top of that with:
+
+- **Role configs** — each agent gets injected with role-specific prompts (Soul, Identity, Tools, Agents, Heartbeat) that define its behavior
+- **Task coordination** — agents poll the Agency API for assigned work, post progress via task comments, and transition tasks through the workflow
+- **Fleet management** — deploy agents locally (Bun subprocess), via Docker, or on EC2 with automatic SSH tunnels
+
+Agents can run any model OpenClaw supports (Claude, GPT, local models), configured through the AI Provider settings.
+
+### Deployment Modes
+
+| Mode | How it works |
+|------|-------------|
+| **Local** | Spawns a Bun subprocess on the host machine. Agent talks to API at `localhost:3100` directly. |
+| **Docker** | Runs `docker compose up` for the agent container. |
+| **EC2** | Opens a reverse SSH tunnel from the remote instance back to the host, so the agent's `agency` CLI hits `localhost:3100` on the remote machine which tunnels back to the host API. |
+
+#### EC2 Agent Setup
+
+1. Configure SSH in Settings → SSH (paste your private key, set the username)
+2. Add `host` to the agent's entry in `.agency/fleet.json`:
+
+```json
+{
+  "agents": {
+    "nova": { "role": "implementer", "location": "ec2", "host": "54.123.45.67" }
+  }
+}
+```
+
+3. Click **Deploy** in the dashboard (or `agency start nova`)
+
+The daemon opens `ssh -R 3100:localhost:3100 user@host -N` — a persistent reverse tunnel with auto-reconnect. The remote agent's CLI commands (`agency tasks list`, `agency msg`, etc.) hit `localhost:3100` which forwards through the tunnel to the host API. No agent-side configuration needed.
+
+On stop, the tunnel is torn down. On daemon shutdown, all tunnels are cleaned up.
+
+You can also SSH directly into any EC2 agent:
+
+```bash
+agency ssh nova          # interactive shell
+agency ssh nova ls -la   # run a command
+```
 
 ### Task Lifecycle
 

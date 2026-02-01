@@ -8,10 +8,16 @@ interface Activity {
   created_at: string;
   agent_name: string | null;
   summary: string;
-  activity_type?: string;
+  type?: string;
 }
 
 const TABS = ["All", "Tasks", "Comments", "Status"] as const;
+
+const TAB_TYPES: Record<string, string[]> = {
+  Tasks: ["task_created", "assigned", "document_created"],
+  Comments: ["message"],
+  Status: ["status_changed"],
+};
 
 function timeAgo(dateStr: string) {
   const seconds = Math.floor((Date.now() - new Date(dateStr).getTime()) / 1000);
@@ -41,6 +47,10 @@ export function LiveFeed() {
 
   const filtered = activities.filter((a) => {
     if (agentFilter && a.agent_name !== agentFilter) return false;
+    if (activeTab !== "All") {
+      const types = TAB_TYPES[activeTab];
+      if (types && a.type && !types.includes(a.type)) return false;
+    }
     return true;
   });
 

@@ -69,8 +69,10 @@ if (await Bun.file(notifyEntry).exists()) {
   );
 }
 
-function shutdown() {
+async function shutdown() {
   console.log("[daemon] shutting down...");
+  const { stopAllTunnels } = await import("./api/lib/tunnels.js");
+  stopAllTunnels();
   for (const child of children) {
     child.kill();
   }

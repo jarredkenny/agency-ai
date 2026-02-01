@@ -1,7 +1,14 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { fetchApi } from "@/lib/api";
+import { fetchApi, mutateApi } from "@/lib/api";
+
+interface Notification {
+  id: string;
+  content: string;
+  task_id: string | null;
+  created_at: string;
+}
 
 export type View = "mission" | "config" | "settings" | "skills" | "roles";
 
@@ -23,6 +30,8 @@ export function Header({ activeView, onViewChange }: HeaderProps) {
   const [taskCount, setTaskCount] = useState(0);
   const [clock, setClock] = useState("");
   const [online, setOnline] = useState(true);
+  const [notifications, setNotifications] = useState<Notification[]>([]);
+  const [showNotifs, setShowNotifs] = useState(false);
 
   useEffect(() => {
     const loadStats = async () => {
@@ -36,10 +45,19 @@ export function Header({ activeView, onViewChange }: HeaderProps) {
         setOnline(false);
       }
     };
+    const loadNotifs = () => {
+      fetchApi("/notifications/pending/human").then(setNotifications).catch(() => {});
+    };
     loadStats();
-    const id = setInterval(loadStats, 5000);
+    loadNotifs();
+    const id = setInterval(() => { loadStats(); loadNotifs(); }, 5000);
     return () => clearInterval(id);
   }, []);
+
+  const dismissNotif = async (id: string) => {
+    await mutateApi(`/notifications/deliver/${id}`, "POST");
+    setNotifications((prev) => prev.filter((n) => n.id !== id));
+  };
 
   useEffect(() => {
     const tick = () => {
@@ -101,6 +119,51 @@ export function Header({ activeView, onViewChange }: HeaderProps) {
             </span>{" "}
             in queue
           </span>
+        </div>
+        <div className="relative">
+          <button
+            onClick={() => setShowNotifs(!showNotifs)}
+            className="relative px-2 py-1 rounded text-sm"
+            style={{ color: "var(--text-secondary)" }}
+          >
+            {notifications.length > 0 && (
+              <span
+                className="absolute -top-1 -right-1 w-4 h-4 rounded-full text-[10px] font-bold flex items-center justify-center text-white"
+                style={{ background: "var(--accent-red, #ef4444)" }}
+              >
+                {notifications.length}
+              </span>
+            )}
+            Bell
+          </button>
+          {showNotifs && notifications.length > 0 && (
+            <div
+              className="absolute right-0 top-full mt-1 w-80 rounded-lg shadow-lg overflow-hidden z-50"
+              style={{ background: "var(--bg-secondary)", border: "1px solid var(--border)" }}
+            >
+              <div className="px-3 py-2 text-xs font-bold" style={{ color: "var(--text-muted)", borderBottom: "1px solid var(--border)" }}>
+                NOTIFICATIONS
+              </div>
+              <div className="max-h-64 overflow-y-auto">
+                {notifications.map((n) => (
+                  <div
+                    key={n.id}
+                    className="px-3 py-2 flex justify-between items-start gap-2 text-sm"
+                    style={{ borderBottom: "1px solid var(--border)" }}
+                  >
+                    <span style={{ color: "var(--text-primary)" }}>{n.content}</span>
+                    <button
+                      onClick={() => dismissNotif(n.id)}
+                      className="shrink-0 text-xs px-1 rounded"
+                      style={{ color: "var(--text-muted)" }}
+                    >
+                      x
+                    </button>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
         </div>
         <div className="flex items-center gap-2" style={{ color: "var(--text-muted)" }}>
           <span className="font-mono text-xs">{clock}</span>

@@ -12,6 +12,7 @@ let watcherTimeout: ReturnType<typeof setTimeout> | null = null;
 interface FleetAgent {
   role: string;
   location?: string;
+  host?: string;
   slackBotToken?: string;
   slackAppToken?: string;
 }

@@ -6,6 +6,8 @@ import {
   removeAgentFromFleet,
 } from "../lib/fleet-sync.js";
 import { startLocal, stopLocal } from "../lib/processes.js";
+import { startTunnel, stopTunnel } from "../lib/tunnels.js";
+import { readFleet } from "../lib/fleet-sync.js";
 
 const NAME_RE = /^[a-z][a-z0-9-]{1,30}$/;
 const VALID_LOCATIONS = new Set(["docker", "ec2", "local"]);
@@ -218,11 +220,26 @@ agents.post("/:name/deploy", async (c) => {
   }
 
   if (agent.location === "ec2") {
-    return c.json({
-      status: "manual",
-      method: "ec2",
-      instructions: "Use the CLI to deploy: agency start " + agent.name,
-    });
+    const fleet = readFleet();
+    const fleetAgent = fleet.agents[agent.name];
+    const host = fleetAgent?.host;
+    if (!host) {
+      return c.json({ error: "No host configured for EC2 agent. Set 'host' in fleet.json or agent config." }, 400);
+    }
+
+    // Open reverse SSH tunnel so agent can reach our API at localhost:3100
+    try {
+      await startTunnel(agent.name, host);
+    } catch (err: any) {
+      return c.json({ error: `Failed to open SSH tunnel: ${err.message}` }, 500);
+    }
+
+    await db
+      .updateTable("agents")
+      .where("id", "=", agent.id)
+      .set({ status: "active", updated_at: new Date().toISOString() })
+      .execute();
+    return c.json({ status: "deployed", method: "ec2", tunnel: true });
   }
 
   if (agent.location === "docker") {
@@ -278,6 +295,16 @@ agents.post("/:name/stop", async (c) => {
       .set({ status: "idle", updated_at: new Date().toISOString() })
       .execute();
     return c.json({ status: "stopped" });
+  }
+
+  if (agent.location === "ec2") {
+    stopTunnel(agent.name);
+    await db
+      .updateTable("agents")
+      .where("id", "=", agent.id)
+      .set({ status: "idle", updated_at: new Date().toISOString() })
+      .execute();
+    return c.json({ status: "stopped", tunnel: "closed" });
   }
 
   return c.json({ error: "stop not supported for this agent location" }, 400);
