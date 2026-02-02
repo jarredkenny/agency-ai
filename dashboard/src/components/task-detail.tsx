@@ -25,13 +25,13 @@ export function TaskDetail({ taskId, onClose }: { taskId: string; onClose: () =>
   }, [reload]);
 
   const handleStatusChange = async (status: string) => {
-    await mutateApi(`/tasks/${taskId}`, "PATCH", { status, agent_name: "human" });
+    await mutateApi(`/tasks/${taskId}`, "PATCH", { status, from: "human" });
     reload();
   };
 
   const handleAssign = async () => {
     if (!assignAgent) return;
-    await mutateApi(`/tasks/${taskId}/assign`, "POST", { agent_name: assignAgent });
+    await mutateApi(`/tasks/${taskId}/assign`, "POST", { agentName: assignAgent });
     setAssignAgent("");
     reload();
   };
@@ -41,7 +41,7 @@ export function TaskDetail({ taskId, onClose }: { taskId: string; onClose: () =>
     setSending(true);
     try {
       await mutateApi(`/tasks/${taskId}/messages`, "POST", {
-        from_agent: "human",
+        from: "human",
         content: newMessage.trim(),
       });
       setNewMessage("");

@@ -1,7 +1,7 @@
 "use client";
 
-import { useState } from "react";
-import { mutateApi } from "@/lib/api";
+import { useState, useEffect } from "react";
+import { fetchApi, mutateApi } from "@/lib/api";
 
 interface Agent {
   id: string;
@@ -9,8 +9,16 @@ interface Agent {
   role: string;
   status: string;
   location: string | null;
+  machine?: string | null;
+  skills?: string[];
   slack_bot_token: string | null;
   slack_app_token: string | null;
+}
+
+interface SkillInfo {
+  id: string;
+  name: string;
+  category: string;
 }
 
 interface Props {
@@ -27,6 +35,21 @@ export function AgentDetailPanel({ agent, onRefresh }: Props) {
   const [slackBotToken, setSlackBotToken] = useState(agent.slack_bot_token ?? "");
   const [slackAppToken, setSlackAppToken] = useState(agent.slack_app_token ?? "");
   const [savingSlack, setSavingSlack] = useState(false);
+
+  // Skills state
+  const [availableSkills, setAvailableSkills] = useState<SkillInfo[]>([]);
+  const [selectedSkills, setSelectedSkills] = useState<Set<string>>(new Set(agent.skills ?? []));
+  const [savingSkills, setSavingSkills] = useState(false);
+  const [skillsDirty, setSkillsDirty] = useState(false);
+
+  useEffect(() => {
+    fetchApi("/skills").then(setAvailableSkills).catch(console.error);
+  }, []);
+
+  useEffect(() => {
+    setSelectedSkills(new Set(agent.skills ?? []));
+    setSkillsDirty(false);
+  }, [agent.skills]);
 
   const handleDeploy = async () => {
     setDeploying(true);
@@ -83,6 +106,32 @@ export function AgentDetailPanel({ agent, onRefresh }: Props) {
     }
   };
 
+  const toggleSkill = (name: string) => {
+    setSelectedSkills((prev) => {
+      const next = new Set(prev);
+      if (next.has(name)) next.delete(name);
+      else next.add(name);
+      return next;
+    });
+    setSkillsDirty(true);
+  };
+
+  const handleSaveSkills = async () => {
+    setSavingSkills(true);
+    try {
+      await mutateApi(`/agents/${agent.name}`, "PATCH", {
+        skills: Array.from(selectedSkills),
+      });
+      setSkillsDirty(false);
+      setMessage("Skills saved");
+      onRefresh();
+    } catch (err: any) {
+      setMessage(err.message);
+    } finally {
+      setSavingSkills(false);
+    }
+  };
+
   const statusColor =
     agent.status === "active" ? "#22c55e" :
     agent.status === "blocked" ? "#ef4444" : "#9ca3af";
@@ -99,6 +148,11 @@ export function AgentDetailPanel({ agent, onRefresh }: Props) {
           {agent.location && (
             <span className="text-xs px-2 py-0.5 rounded" style={{ background: "var(--bg-tertiary)", color: "var(--text-muted)" }}>
               {agent.location}
+            </span>
+          )}
+          {agent.location === "remote" && agent.machine && (
+            <span className="text-xs px-2 py-0.5 rounded" style={{ background: "var(--bg-tertiary)", color: "var(--text-muted)" }}>
+              {agent.machine}
             </span>
           )}
         </div>
@@ -143,6 +197,54 @@ export function AgentDetailPanel({ agent, onRefresh }: Props) {
       {message && (
         <div className="text-sm px-3 py-2 rounded" style={{ background: "var(--bg-tertiary)", color: "var(--text-secondary)" }}>
           {message}
+        </div>
+      )}
+
+      {/* Skills */}
+      {availableSkills.length > 0 && (
+        <div className="space-y-2">
+          <div className="flex items-center justify-between">
+            <div className="text-xs font-medium" style={{ color: "var(--text-muted)" }}>Skills</div>
+            {skillsDirty && (
+              <button
+                onClick={handleSaveSkills}
+                disabled={savingSkills}
+                className="px-2 py-1 rounded text-xs font-medium text-white"
+                style={{ background: "var(--accent-green)", opacity: savingSkills ? 0.6 : 1 }}
+              >
+                {savingSkills ? "Saving..." : "Save Skills"}
+              </button>
+            )}
+          </div>
+          <div className="flex flex-wrap gap-2">
+            {availableSkills.map((skill) => {
+              const checked = selectedSkills.has(skill.name);
+              return (
+                <label
+                  key={skill.name}
+                  className="flex items-center gap-1.5 text-xs cursor-pointer px-2 py-1 rounded"
+                  style={{
+                    background: checked ? "var(--accent-blue)" : "var(--bg-secondary)",
+                    color: checked ? "white" : "var(--text-secondary)",
+                    border: "1px solid var(--border)",
+                  }}
+                >
+                  <input
+                    type="checkbox"
+                    checked={checked}
+                    onChange={() => toggleSkill(skill.name)}
+                    className="sr-only"
+                  />
+                  {skill.name}
+                </label>
+              );
+            })}
+          </div>
+          {selectedSkills.size === 0 && (
+            <div className="text-xs" style={{ color: "var(--text-muted)" }}>
+              No skills selected — agent will receive all skills.
+            </div>
+          )}
         </div>
       )}
 

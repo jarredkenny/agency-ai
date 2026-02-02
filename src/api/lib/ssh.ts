@@ -1,43 +1,56 @@
 import * as fs from "fs";
 import * as path from "path";
 import * as os from "os";
-import { db } from "../db/client.js";
+import { readMachines, type Machine } from "../routes/machines.js";
 
-export async function getSSHConfig(): Promise<{ keyPath: string; user: string }> {
-  const rows = await db
-    .selectFrom("settings")
-    .where("category", "=", "ssh")
-    .selectAll()
-    .execute();
+export function getSSHConfigFromMachine(machine: Machine): { keyPath: string; user: string; host: string; port: number } {
+  const user = machine.user || "ubuntu";
+  const host = machine.host;
+  const port = machine.port || 22;
 
-  const settings: Record<string, string> = {};
-  for (const r of rows) settings[r.key] = r.value;
-
-  const user = settings["ssh.user"] || "ubuntu";
-  const privateKey = settings["ssh.private_key"] || "";
-
-  if (!privateKey) {
-    throw new Error("SSH private key not configured. Set it in Settings → SSH.");
+  if (machine.auth === "key" && machine.ssh_key) {
+    const keyDir = path.join(os.tmpdir(), "agency-ssh");
+    fs.mkdirSync(keyDir, { recursive: true, mode: 0o700 });
+    const keyPath = path.join(keyDir, `key_${machine.name}`);
+    fs.writeFileSync(keyPath, machine.ssh_key + "\n", { mode: 0o600 });
+    return { keyPath, user, host, port };
   }
 
-  const keyDir = path.join(os.tmpdir(), "agency-ssh");
-  fs.mkdirSync(keyDir, { recursive: true, mode: 0o700 });
-  const keyPath = path.join(keyDir, "agent_key");
-  fs.writeFileSync(keyPath, privateKey + "\n", { mode: 0o600 });
+  throw new Error(`SSH key not configured for machine "${machine.name}". Add ssh_key in Settings → Machines.`);
+}
 
-  return { keyPath, user };
+export function getMachineByName(machineName?: string): Machine {
+  const machines = readMachines();
+  if (machines.length === 0) {
+    throw new Error("No machines configured. Add one in Settings → Machines.");
+  }
+
+  if (machineName) {
+    const machine = machines.find((m) => m.name === machineName);
+    if (!machine) throw new Error(`Machine "${machineName}" not found.`);
+    return machine;
+  }
+
+  return machines[0];
+}
+
+export async function getSSHConfig(machineName?: string): Promise<{ keyPath: string; user: string; host: string; port: number }> {
+  const machine = getMachineByName(machineName);
+  return getSSHConfigFromMachine(machine);
 }
 
 export async function sshExec(
   host: string,
   command: string,
+  machineName?: string,
 ): Promise<{ exitCode: number; stdout: string; stderr: string }> {
-  const { keyPath, user } = await getSSHConfig();
+  const { keyPath, user, port } = await getSSHConfig(machineName);
 
   const proc = Bun.spawn(
     [
       "ssh",
       "-i", keyPath,
+      "-p", String(port),
       "-o", "StrictHostKeyChecking=no",
       "-o", "ConnectTimeout=10",
       `${user}@${host}`,

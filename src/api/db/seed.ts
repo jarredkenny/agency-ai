@@ -1,6 +1,12 @@
 import { db } from "./client.js";
 import * as fs from "fs";
 import * as path from "path";
+import {
+  getRoleConfig,
+  putRoleConfig,
+  putSkill,
+  configTypeToFilename,
+} from "../lib/fs-store.js";
 
 const TEMPLATES_DIR = path.join(import.meta.dir, "../../templates");
 
@@ -40,18 +46,25 @@ export async function seedDefaults(options: SeedOptions = {}) {
     { key: "ai.oauth_refresh_token", value: "", category: "ai", description: "Claude OAuth refresh token", sensitive: 1, input_type: "password" },
     { key: "ai.oauth_expires_at", value: "", category: "ai", description: "Token expiry (ISO string)", sensitive: 0, input_type: "readonly" },
     { key: "ai.oauth_subscription_type", value: "", category: "ai", description: "Subscription type (max, pro, etc.)", sensitive: 0, input_type: "readonly" },
-    // AWS
-    { key: "aws.access_key_id", value: "", category: "aws", description: "AWS Access Key ID", sensitive: 1, input_type: "password" },
-    { key: "aws.secret_access_key", value: "", category: "aws", description: "AWS Secret Access Key", sensitive: 1, input_type: "password" },
-    { key: "aws.region", value: "", category: "aws", description: "AWS region", sensitive: 0, input_type: "text" },
-    { key: "aws.ami_id", value: "", category: "aws", description: "AMI for EC2 agents", sensitive: 0, input_type: "text" },
-    { key: "aws.instance_type", value: "", category: "aws", description: "Default EC2 instance type", sensitive: 0, input_type: "text" },
-    { key: "aws.s3_bucket_prefix", value: "", category: "aws", description: "S3 bucket prefix", sensitive: 0, input_type: "text" },
-    // SSH
-    { key: "ssh.private_key", value: "", category: "ssh", description: "SSH private key content", sensitive: 1, input_type: "textarea" },
-    { key: "ssh.public_key", value: "", category: "ssh", description: "SSH public key (for display/copy)", sensitive: 0, input_type: "textarea" },
-    { key: "ssh.key_name", value: "", category: "ssh", description: "SSH key name", sensitive: 0, input_type: "text" },
-    { key: "ssh.user", value: "", category: "ssh", description: "SSH username", sensitive: 0, input_type: "text" },
+    // OpenClaw Agent Defaults
+    { key: "agent.model", value: "claude-sonnet-4-20250514", category: "agent", description: "Primary model for all agents", sensitive: 0, input_type: "text" },
+    { key: "agent.model_fallbacks", value: "", category: "agent", description: "Comma-separated fallback models", sensitive: 0, input_type: "text" },
+    { key: "agent.thinking", value: "low", category: "agent", description: "Extended thinking mode: off, low, medium, high", sensitive: 0, input_type: "select:off,low,medium,high" },
+    { key: "agent.timeout_seconds", value: "600", category: "agent", description: "Agent run timeout in seconds", sensitive: 0, input_type: "text" },
+    { key: "agent.max_concurrent", value: "1", category: "agent", description: "Max parallel agent runs per instance", sensitive: 0, input_type: "text" },
+    { key: "agent.sandbox_mode", value: "non-main", category: "agent", description: "Sandboxing: off, non-main, always", sensitive: 0, input_type: "select:off,non-main,always" },
+    { key: "agent.sandbox_scope", value: "agent", category: "agent", description: "Sandbox lifecycle: agent, session, message", sensitive: 0, input_type: "select:agent,session,message" },
+    { key: "agent.tools_profile", value: "full", category: "agent", description: "Tool allowlist profile: full, standard, minimal", sensitive: 0, input_type: "select:full,standard,minimal" },
+    { key: "agent.tools_allow", value: "", category: "agent", description: "Comma-separated tool allowlist (overrides profile)", sensitive: 0, input_type: "text" },
+    { key: "agent.tools_deny", value: "", category: "agent", description: "Comma-separated tool denylist", sensitive: 0, input_type: "text" },
+    { key: "agent.web_search", value: "true", category: "agent", description: "Enable web search tool", sensitive: 0, input_type: "select:true,false" },
+    { key: "agent.exec_timeout_sec", value: "1800", category: "agent", description: "Process execution kill timeout (seconds)", sensitive: 0, input_type: "text" },
+    { key: "agent.browser_enabled", value: "true", category: "agent", description: "Start managed browser instance", sensitive: 0, input_type: "select:true,false" },
+    { key: "agent.logging_level", value: "info", category: "agent", description: "Log verbosity: debug, info, warn, error", sensitive: 0, input_type: "select:debug,info,warn,error" },
+    { key: "agent.logging_redact", value: "tools", category: "agent", description: "Redact sensitive data: off, tools, all", sensitive: 0, input_type: "select:off,tools,all" },
+    { key: "agent.context_pruning", value: "adaptive", category: "agent", description: "Context pruning mode: off, adaptive, aggressive", sensitive: 0, input_type: "select:off,adaptive,aggressive" },
+    { key: "agent.compaction", value: "default", category: "agent", description: "Memory compaction: off, default, aggressive", sensitive: 0, input_type: "select:off,default,aggressive" },
+    { key: "agent.heartbeat_interval", value: "30m", category: "agent", description: "Heartbeat check interval (e.g. 30m, 1h)", sensitive: 0, input_type: "text" },
   ];
 
   for (const s of defaultSettings) {
@@ -63,7 +76,12 @@ export async function seedDefaults(options: SeedOptions = {}) {
   }
 
   // Clean up removed settings
-  const removedKeys = ["slack.team_channel", "slack.human_user_id", "ssh.key_path", "aws.profile"];
+  const removedKeys = [
+    "slack.team_channel", "slack.human_user_id", "ssh.key_path", "aws.profile",
+    "aws.access_key_id", "aws.secret_access_key", "aws.region", "aws.ami_id",
+    "aws.instance_type", "aws.s3_bucket_prefix",
+    "ssh.private_key", "ssh.public_key", "ssh.key_name", "ssh.user",
+  ];
   for (const key of removedKeys) {
     await db.deleteFrom("settings").where("key", "=", key).execute();
   }
@@ -79,7 +97,35 @@ export async function seedDefaults(options: SeedOptions = {}) {
       .replace(/\{\{team\.name\}\}/g, teamName);
   }
 
-  // Seed role configs for each role
+  // Migrate existing DB role_configs to filesystem (one-time)
+  try {
+    const dbConfigs = await db.selectFrom("role_configs").selectAll().execute();
+    for (const row of dbConfigs) {
+      if (getRoleConfig(row.role, row.config_type) === null) {
+        putRoleConfig(row.role, row.config_type, row.content);
+        console.log(`[seed] migrated role_config to fs: ${row.role}/${row.config_type}`);
+      }
+    }
+  } catch {
+    // Table may not exist if fresh install — that's fine
+  }
+
+  // Migrate existing DB skills to filesystem (one-time)
+  try {
+    const dbSkills = await db.selectFrom("skills").selectAll().execute();
+    for (const row of dbSkills) {
+      const { getSkill } = await import("../lib/fs-store.js");
+      if (!getSkill(row.name)) {
+        const tags = JSON.parse(row.tags) as string[];
+        putSkill(row.name, row.body, row.category, tags);
+        console.log(`[seed] migrated skill to fs: ${row.name}`);
+      }
+    }
+  } catch {
+    // Table may not exist — fine
+  }
+
+  // Seed role configs to filesystem from templates
   const ROLE_SPECIFIC = ["heartbeat", "agents-config", "tools", "agents"];
   const SHARED_CONFIGS: { configType: string; template: string }[] = [
     { configType: "environment", template: "environment.md" },
@@ -95,21 +141,9 @@ export async function seedDefaults(options: SeedOptions = {}) {
     ];
 
     for (const { configType, segments } of configs) {
-      const existing = await db
-        .selectFrom("role_configs")
-        .where("role", "=", role)
-        .where("config_type", "=", configType)
-        .selectAll()
-        .executeTakeFirst();
-
-      if (!existing) {
+      if (getRoleConfig(role, configType) === null) {
         const content = interpolate(readTemplate(...segments));
-        await db.insertInto("role_configs").values({
-          id: crypto.randomUUID(),
-          role,
-          config_type: configType,
-          content,
-        }).execute();
+        putRoleConfig(role, configType, content);
         console.log(`[seed] role_config: ${role}/${configType}`);
       }
     }

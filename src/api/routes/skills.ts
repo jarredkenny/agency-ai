@@ -1,28 +1,30 @@
 import { Hono } from "hono";
-import { db } from "../db/client.js";
-import { syncSkills, pushSkillsToAllAgents } from "../lib/sync-skills.js";
+import { listSkills, getSkill, putSkill, deleteSkill } from "../lib/fs-store.js";
+import { pushSkillsToAllAgents } from "../lib/sync-skills.js";
 import { cloneRepo, scanSkills, cleanupRepo } from "../lib/import-skills.js";
 
 export const skills = new Hono();
 
+function withId(skill: { name: string; body: string; category: string; tags: string[] }) {
+  return { id: skill.name, ...skill };
+}
+
 // List skills, optional ?category=, ?search=
 skills.get("/", async (c) => {
   const category = c.req.query("category");
-  const search = c.req.query("search");
+  const search = c.req.query("search")?.toLowerCase();
 
-  let q = db.selectFrom("skills").selectAll();
-  if (category) q = q.where("category", "=", category);
+  let rows = listSkills();
+  if (category) rows = rows.filter((r) => r.category === category);
   if (search) {
-    q = q.where((eb) =>
-      eb.or([
-        eb("name", "like", `%${search}%`),
-        eb("body", "like", `%${search}%`),
-      ])
+    rows = rows.filter(
+      (r) =>
+        r.name.toLowerCase().includes(search) ||
+        r.body.toLowerCase().includes(search)
     );
   }
 
-  const rows = await q.orderBy("name").execute();
-  return c.json(rows.map((r) => ({ ...r, tags: JSON.parse(r.tags) })));
+  return c.json(rows.map(withId));
 });
 
 const KNOWN_REPOS = [
@@ -106,44 +108,19 @@ skills.post("/import", async (c) => {
 
     for (const skill of available) {
       try {
-        const existing = await db
-          .selectFrom("skills")
-          .where("name", "=", skill.name)
-          .selectAll()
-          .executeTakeFirst();
-
+        const existing = getSkill(skill.name);
         if (existing && !overwrite) {
           skipped.push(skill.name);
           continue;
         }
-
-        if (existing) {
-          await db
-            .updateTable("skills")
-            .where("id", "=", existing.id)
-            .set({ body: skill.body, category: skill.category, updated_at: new Date().toISOString() })
-            .execute();
-        } else {
-          await db
-            .insertInto("skills")
-            .values({
-              id: crypto.randomUUID(),
-              name: skill.name,
-              body: skill.body,
-              category: skill.category,
-              tags: JSON.stringify([]),
-            })
-            .execute();
-        }
+        putSkill(skill.name, skill.body, skill.category);
         imported.push(skill.name);
       } catch (err: any) {
         errors.push(`${skill.name}: ${err.message}`);
       }
     }
 
-    await syncSkills();
     pushSkillsToAllAgents().catch(() => {});
-
     return c.json({ imported, skipped, errors });
   } catch (err: any) {
     return c.json({ error: err.message }, 500);
@@ -152,11 +129,11 @@ skills.post("/import", async (c) => {
   }
 });
 
-// Get one skill
-skills.get("/:id", async (c) => {
-  const row = await db.selectFrom("skills").where("id", "=", c.req.param("id")).selectAll().executeTakeFirst();
-  if (!row) return c.json({ error: "not found" }, 404);
-  return c.json({ ...row, tags: JSON.parse(row.tags) });
+// Get one skill by name
+skills.get("/:name", async (c) => {
+  const skill = getSkill(c.req.param("name"));
+  if (!skill) return c.json({ error: "not found" }, 404);
+  return c.json(withId(skill));
 });
 
 // Create skill
@@ -165,47 +142,42 @@ skills.post("/", async (c) => {
     name: string; body: string; category?: string; tags?: string[];
   }>();
 
-  const row = await db
-    .insertInto("skills")
-    .values({
-      id: crypto.randomUUID(),
-      name: body.name,
-      body: body.body,
-      category: body.category ?? "general",
-      tags: JSON.stringify(body.tags ?? []),
-    })
-    .returningAll()
-    .executeTakeFirstOrThrow();
-
-  await syncSkills();
+  putSkill(body.name, body.body, body.category ?? "general", body.tags ?? []);
   pushSkillsToAllAgents().catch(() => {});
-  return c.json({ ...row, tags: JSON.parse(row.tags) }, 201);
+
+  const skill = getSkill(body.name)!;
+  return c.json(withId(skill), 201);
 });
 
 // Update skill
-skills.put("/:id", async (c) => {
-  const id = c.req.param("id");
+skills.put("/:name", async (c) => {
+  const name = c.req.param("name");
+  const existing = getSkill(name);
+  if (!existing) return c.json({ error: "not found" }, 404);
+
   const body = await c.req.json<{
     name?: string; body?: string; category?: string; tags?: string[];
   }>();
 
-  let q = db.updateTable("skills").where("id", "=", id);
-  if (body.name !== undefined) q = q.set("name", body.name);
-  if (body.body !== undefined) q = q.set("body", body.body);
-  if (body.category !== undefined) q = q.set("category", body.category);
-  if (body.tags !== undefined) q = q.set("tags", JSON.stringify(body.tags));
-  q = q.set("updated_at", new Date().toISOString());
+  const newName = body.name ?? name;
+  const newBody = body.body ?? existing.body;
+  const newCategory = body.category ?? existing.category;
+  const newTags = body.tags ?? existing.tags;
 
-  const row = await q.returningAll().executeTakeFirstOrThrow();
-  await syncSkills();
+  // If renamed, delete old first
+  if (newName !== name) {
+    deleteSkill(name);
+  }
+
+  putSkill(newName, newBody, newCategory, newTags);
   pushSkillsToAllAgents().catch(() => {});
-  return c.json({ ...row, tags: JSON.parse(row.tags) });
+
+  return c.json(withId(getSkill(newName)!));
 });
 
 // Delete skill
-skills.delete("/:id", async (c) => {
-  await db.deleteFrom("skills").where("id", "=", c.req.param("id")).execute();
-  await syncSkills();
+skills.delete("/:name", async (c) => {
+  deleteSkill(c.req.param("name"));
   pushSkillsToAllAgents().catch(() => {});
   return c.json({ ok: true });
 });

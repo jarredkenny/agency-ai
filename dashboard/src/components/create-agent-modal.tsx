@@ -9,11 +9,20 @@ interface Props {
   onCreated: () => void;
 }
 
+interface MachineInfo {
+  name: string;
+  host: string;
+  user: string;
+  port: number;
+}
+
 export function CreateAgentModal({ open, onClose, onCreated }: Props) {
   const [name, setName] = useState("");
   const [role, setRole] = useState("");
   const [roles, setRoles] = useState<string[]>([]);
   const [location, setLocation] = useState("docker");
+  const [machine, setMachine] = useState("");
+  const [machines, setMachines] = useState<MachineInfo[]>([]);
   const [slackOpen, setSlackOpen] = useState(false);
   const [slackBotToken, setSlackBotToken] = useState("");
   const [slackAppToken, setSlackAppToken] = useState("");
@@ -25,6 +34,10 @@ export function CreateAgentModal({ open, onClose, onCreated }: Props) {
       fetchApi("/agents/roles").then((r) => {
         setRoles(r);
         if (r.length > 0 && !role) setRole(r[0]);
+      });
+      fetchApi("/machines").then((m) => {
+        setMachines(m);
+        if (m.length > 0 && !machine) setMachine(m[0].name);
       });
     }
   }, [open]);
@@ -40,6 +53,7 @@ export function CreateAgentModal({ open, onClose, onCreated }: Props) {
         name,
         role,
         location,
+        ...(location === "remote" && machine ? { machine } : {}),
         ...(slackBotToken ? { slack_bot_token: slackBotToken } : {}),
         ...(slackAppToken ? { slack_app_token: slackAppToken } : {}),
       });
@@ -114,7 +128,7 @@ export function CreateAgentModal({ open, onClose, onCreated }: Props) {
           <div>
             <label className="block text-sm font-medium mb-2">Location</label>
             <div className="flex gap-3">
-              {["docker", "ec2", "local"].map((loc) => (
+              {["docker", "remote", "local"].map((loc) => (
                 <label key={loc} className="flex items-center gap-1.5 text-sm cursor-pointer">
                   <input
                     type="radio"
@@ -128,6 +142,30 @@ export function CreateAgentModal({ open, onClose, onCreated }: Props) {
               ))}
             </div>
           </div>
+
+          {location === "remote" && (
+            <div>
+              <label className="block text-sm font-medium mb-1">Machine</label>
+              {machines.length === 0 ? (
+                <div className="text-xs" style={{ color: "var(--text-muted)" }}>
+                  No machines configured. Add one in Settings → Machines.
+                </div>
+              ) : (
+                <select
+                  value={machine}
+                  onChange={(e) => setMachine(e.target.value)}
+                  className="w-full px-3 py-2 rounded-md text-sm"
+                  style={{ background: "var(--bg-secondary)", border: "1px solid var(--border)" }}
+                >
+                  {machines.map((m) => (
+                    <option key={m.name} value={m.name}>
+                      {m.name} ({m.user}@{m.host})
+                    </option>
+                  ))}
+                </select>
+              )}
+            </div>
+          )}
 
           <div>
             <button

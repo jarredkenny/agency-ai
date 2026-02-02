@@ -1,14 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { fetchApi, mutateApi } from "@/lib/api";
-
-interface Notification {
-  id: string;
-  content: string;
-  task_id: string | null;
-  created_at: string;
-}
+import { fetchApi } from "@/lib/api";
 
 export type View = "mission" | "config" | "settings" | "skills" | "roles" | "knowledge" | "documents";
 
@@ -18,48 +11,31 @@ interface HeaderProps {
 }
 
 const NAV_ITEMS: { key: View; label: string }[] = [
-  { key: "mission", label: "Mission Control" },
-  { key: "config", label: "Agent Config" },
-  { key: "settings", label: "Settings" },
-  { key: "skills", label: "Skills" },
+  { key: "mission", label: "Tasks" },
+  { key: "config", label: "Agents" },
   { key: "roles", label: "Roles" },
-  { key: "knowledge", label: "Knowledge" },
+  { key: "skills", label: "Skills" },
   { key: "documents", label: "Docs" },
+  { key: "knowledge", label: "Knowledge" },
 ];
 
 export function Header({ activeView, onViewChange }: HeaderProps) {
-  const [agentCount, setAgentCount] = useState(0);
-  const [taskCount, setTaskCount] = useState(0);
   const [clock, setClock] = useState("");
   const [online, setOnline] = useState(true);
-  const [notifications, setNotifications] = useState<Notification[]>([]);
-  const [showNotifs, setShowNotifs] = useState(false);
 
   useEffect(() => {
-    const loadStats = async () => {
+    const checkOnline = async () => {
       try {
-        const agents = await fetchApi("/agents");
-        const tasks = await fetchApi("/tasks");
-        setAgentCount(agents.filter((a: any) => a.status === "active").length);
-        setTaskCount(tasks.filter((t: any) => t.status !== "done").length);
+        await fetchApi("/agents");
         setOnline(true);
       } catch {
         setOnline(false);
       }
     };
-    const loadNotifs = () => {
-      fetchApi("/notifications/pending/human").then(setNotifications).catch(() => {});
-    };
-    loadStats();
-    loadNotifs();
-    const id = setInterval(() => { loadStats(); loadNotifs(); }, 5000);
+    checkOnline();
+    const id = setInterval(checkOnline, 5000);
     return () => clearInterval(id);
   }, []);
-
-  const dismissNotif = async (id: string) => {
-    await mutateApi(`/notifications/deliver/${id}`, "POST");
-    setNotifications((prev) => prev.filter((n) => n.id !== id));
-  };
 
   useEffect(() => {
     const tick = () => {
@@ -107,66 +83,21 @@ export function Header({ activeView, onViewChange }: HeaderProps) {
         </nav>
       </div>
 
-      <div className="flex items-center gap-5 text-sm">
-        <div className="flex items-center gap-4" style={{ color: "var(--text-secondary)" }}>
-          <span>
-            <span className="font-semibold" style={{ color: "var(--text-primary)" }}>
-              {agentCount}
-            </span>{" "}
-            agents active
-          </span>
-          <span>
-            <span className="font-semibold" style={{ color: "var(--text-primary)" }}>
-              {taskCount}
-            </span>{" "}
-            in queue
-          </span>
-        </div>
-        <div className="relative">
-          <button
-            onClick={() => setShowNotifs(!showNotifs)}
-            className="relative px-2 py-1 rounded text-sm"
-            style={{ color: "var(--text-secondary)" }}
-          >
-            {notifications.length > 0 && (
-              <span
-                className="absolute -top-1 -right-1 w-4 h-4 rounded-full text-[10px] font-bold flex items-center justify-center text-white"
-                style={{ background: "var(--accent-red, #ef4444)" }}
-              >
-                {notifications.length}
-              </span>
-            )}
-            Bell
-          </button>
-          {showNotifs && notifications.length > 0 && (
-            <div
-              className="absolute right-0 top-full mt-1 w-80 rounded-lg shadow-lg overflow-hidden z-50"
-              style={{ background: "var(--bg-secondary)", border: "1px solid var(--border)" }}
-            >
-              <div className="px-3 py-2 text-xs font-bold" style={{ color: "var(--text-muted)", borderBottom: "1px solid var(--border)" }}>
-                NOTIFICATIONS
-              </div>
-              <div className="max-h-64 overflow-y-auto">
-                {notifications.map((n) => (
-                  <div
-                    key={n.id}
-                    className="px-3 py-2 flex justify-between items-start gap-2 text-sm"
-                    style={{ borderBottom: "1px solid var(--border)" }}
-                  >
-                    <span style={{ color: "var(--text-primary)" }}>{n.content}</span>
-                    <button
-                      onClick={() => dismissNotif(n.id)}
-                      className="shrink-0 text-xs px-1 rounded"
-                      style={{ color: "var(--text-muted)" }}
-                    >
-                      x
-                    </button>
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
-        </div>
+      <div className="flex items-center gap-4 text-sm">
+        <button
+          onClick={() => onViewChange("settings")}
+          className="w-8 h-8 rounded-md flex items-center justify-center transition-colors"
+          style={{
+            background: activeView === "settings" ? "var(--bg-tertiary)" : "transparent",
+            color: activeView === "settings" ? "var(--text-primary)" : "var(--text-secondary)",
+          }}
+          title="Settings"
+        >
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M6.86 1.45a1.2 1.2 0 0 1 2.28 0l.2.6a1.2 1.2 0 0 0 1.57.7l.58-.24a1.2 1.2 0 0 1 1.6 1.14l-.02.63a1.2 1.2 0 0 0 1.04 1.22l.62.1a1.2 1.2 0 0 1 .8 1.97l-.43.46a1.2 1.2 0 0 0 0 1.6l.43.46a1.2 1.2 0 0 1-.8 1.97l-.62.1a1.2 1.2 0 0 0-1.04 1.22l.02.63a1.2 1.2 0 0 1-1.6 1.14l-.58-.24a1.2 1.2 0 0 0-1.57.7l-.2.6a1.2 1.2 0 0 1-2.28 0l-.2-.6a1.2 1.2 0 0 0-1.57-.7l-.58.24a1.2 1.2 0 0 1-1.6-1.14l.02-.63a1.2 1.2 0 0 0-1.04-1.22l-.62-.1a1.2 1.2 0 0 1-.8-1.97l.43-.46a1.2 1.2 0 0 0 0-1.6l-.43-.46a1.2 1.2 0 0 1 .8-1.97l.62-.1A1.2 1.2 0 0 0 2.91 4.3l-.02-.63a1.2 1.2 0 0 1 1.6-1.14l.58.24a1.2 1.2 0 0 0 1.57-.7l.2-.6Z" />
+            <circle cx="8" cy="8" r="2.5" />
+          </svg>
+        </button>
         <div className="flex items-center gap-2" style={{ color: "var(--text-muted)" }}>
           <span className="font-mono text-xs">{clock}</span>
           <span

@@ -12,13 +12,58 @@ interface Setting {
   input_type: string;
 }
 
+interface Repo {
+  name: string;
+  url: string;
+  branch?: string;
+}
+
+interface Machine {
+  name: string;
+  host: string;
+  user: string;
+  port: number;
+  auth: "key" | "password";
+  ssh_key?: string;
+  password?: string;
+}
+
 const MASKED = "********";
 
 const CATEGORIES = [
   { id: "identity", label: "Identity" },
   { id: "ai", label: "AI Provider" },
-  { id: "aws", label: "AWS" },
-  { id: "ssh", label: "SSH" },
+  { id: "agent", label: "Agent Defaults" },
+  { id: "repos", label: "Repos" },
+  { id: "machines", label: "Machines" },
+];
+
+// Group agent settings into sections for the UI
+const AGENT_SECTIONS: { label: string; keys: string[] }[] = [
+  {
+    label: "Model",
+    keys: ["agent.model", "agent.model_fallbacks", "agent.thinking"],
+  },
+  {
+    label: "Execution",
+    keys: ["agent.timeout_seconds", "agent.max_concurrent", "agent.heartbeat_interval"],
+  },
+  {
+    label: "Tools",
+    keys: ["agent.tools_profile", "agent.tools_allow", "agent.tools_deny", "agent.web_search", "agent.exec_timeout_sec"],
+  },
+  {
+    label: "Sandbox",
+    keys: ["agent.sandbox_mode", "agent.sandbox_scope"],
+  },
+  {
+    label: "Memory",
+    keys: ["agent.context_pruning", "agent.compaction"],
+  },
+  {
+    label: "Browser & Logging",
+    keys: ["agent.browser_enabled", "agent.logging_level", "agent.logging_redact"],
+  },
 ];
 
 // Keys managed by the OAuth card — hidden from the normal list
@@ -38,6 +83,16 @@ export function SettingsEditor() {
   const [revealed, setRevealed] = useState<Set<string>>(new Set());
   const [authMethod, setAuthMethod] = useState<"api_key" | "oauth">("api_key");
 
+  // Repos state
+  const [repos, setRepos] = useState<Repo[]>([]);
+  const [newRepo, setNewRepo] = useState<{ name: string; url: string; branch: string }>({ name: "", url: "", branch: "" });
+
+  // Machines state
+  const [machinesList, setMachinesList] = useState<Machine[]>([]);
+  const [newMachine, setNewMachine] = useState<Partial<Machine>>({ name: "", host: "", user: "ubuntu", port: 22, auth: "key" });
+  const [editingMachine, setEditingMachine] = useState<string | null>(null);
+  const [machineEdits, setMachineEdits] = useState<Partial<Machine>>({});
+
   const reload = useCallback(() => {
     fetchApi("/settings").then((rows: Setting[]) => {
       setSettings(rows);
@@ -48,7 +103,15 @@ export function SettingsEditor() {
     }).catch(console.error);
   }, []);
 
-  useEffect(() => { reload(); }, [reload]);
+  const reloadRepos = useCallback(() => {
+    fetchApi("/repos").then(setRepos).catch(console.error);
+  }, []);
+
+  const reloadMachines = useCallback(() => {
+    fetchApi("/machines").then(setMachinesList).catch(console.error);
+  }, []);
+
+  useEffect(() => { reload(); reloadRepos(); reloadMachines(); }, [reload, reloadRepos, reloadMachines]);
 
   const filtered = settings.filter((s) => s.category === activeCategory);
 
@@ -58,7 +121,6 @@ export function SettingsEditor() {
     setSaving(key);
     try {
       await mutateApi(`/settings/${key}`, "PUT", { value: val });
-      // Reload to get masked values back
       reload();
       setEdits((prev) => {
         const next = { ...prev };
@@ -145,6 +207,25 @@ export function SettingsEditor() {
     const isEditing = edits[s.key] !== undefined;
     const currentValue = edits[s.key] ?? s.value;
     const isDirty = isEditing && edits[s.key] !== s.value;
+
+    if (s.input_type.startsWith("select:")) {
+      const options = s.input_type.slice(7).split(",");
+      return (
+        <div className="flex gap-2">
+          <select
+            value={currentValue}
+            onChange={(e) => setEdits((prev) => ({ ...prev, [s.key]: e.target.value }))}
+            className="flex-1 px-3 py-2 rounded-md text-sm"
+            style={{ background: "var(--bg-secondary)", border: "1px solid var(--border)" }}
+          >
+            {options.map((opt) => (
+              <option key={opt} value={opt}>{opt}</option>
+            ))}
+          </select>
+          {isDirty && <SaveButton keyName={s.key} saving={saving} onSave={handleSave} />}
+        </div>
+      );
+    }
 
     if (s.input_type === "readonly") {
       return (
@@ -339,9 +420,330 @@ export function SettingsEditor() {
     );
   };
 
+  const renderAgentCategory = () => {
+    const settingsMap = new Map(filtered.map((s) => [s.key, s]));
+
+    return (
+      <div className="space-y-6 max-w-xl">
+        <div className="text-xs" style={{ color: "var(--text-muted)" }}>
+          These settings configure all OpenClaw agent instances. Changes take effect on next deploy.
+        </div>
+        {AGENT_SECTIONS.map((section) => {
+          const sectionSettings = section.keys.map((k) => settingsMap.get(k)).filter(Boolean) as Setting[];
+          if (sectionSettings.length === 0) return null;
+          return (
+            <div key={section.label}>
+              <div
+                className="text-xs font-bold tracking-wider mb-3 pb-1 border-b"
+                style={{ color: "var(--text-muted)", borderColor: "var(--border)" }}
+              >
+                {section.label.toUpperCase()}
+              </div>
+              <div className="space-y-4">
+                {sectionSettings.map((s) => (
+                  <div key={s.key} className="space-y-1">
+                    <label className="text-sm font-medium">{s.key.replace("agent.", "")}</label>
+                    {s.description && (
+                      <div className="text-xs" style={{ color: "var(--text-muted)" }}>{s.description}</div>
+                    )}
+                    {renderInput(s)}
+                  </div>
+                ))}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    );
+  };
+
+  const renderReposCategory = () => {
+    const handleAddRepo = async () => {
+      if (!newRepo.name || !newRepo.url) return;
+      try {
+        await mutateApi("/repos", "POST", {
+          name: newRepo.name,
+          url: newRepo.url,
+          ...(newRepo.branch ? { branch: newRepo.branch } : {}),
+        });
+        setNewRepo({ name: "", url: "", branch: "" });
+        reloadRepos();
+      } catch (err: any) {
+        console.error(err.message);
+      }
+    };
+
+    const handleDeleteRepo = async (name: string) => {
+      await mutateApi(`/repos/${name}`, "DELETE");
+      reloadRepos();
+    };
+
+    return (
+      <div className="space-y-4 max-w-xl">
+        <div className="text-xs" style={{ color: "var(--text-muted)" }}>
+          Git repositories that agents clone as workspaces.
+        </div>
+
+        {repos.map((r) => (
+          <div
+            key={r.name}
+            className="rounded-lg p-4 flex items-start justify-between gap-3"
+            style={{ background: "var(--bg-secondary)", border: "1px solid var(--border)" }}
+          >
+            <div className="space-y-1 min-w-0">
+              <div className="text-sm font-medium">{r.name}</div>
+              <div className="text-xs truncate" style={{ color: "var(--text-muted)" }}>{r.url}</div>
+              {r.branch && (
+                <div className="text-xs" style={{ color: "var(--text-muted)" }}>Branch: {r.branch}</div>
+              )}
+            </div>
+            <button
+              onClick={() => handleDeleteRepo(r.name)}
+              className="px-2 py-1 rounded text-xs font-medium shrink-0"
+              style={{ background: "var(--bg-tertiary)", color: "var(--text-secondary)" }}
+            >
+              Remove
+            </button>
+          </div>
+        ))}
+
+        <div
+          className="rounded-lg p-4 space-y-3"
+          style={{ background: "var(--bg-secondary)", border: "1px solid var(--border)" }}
+        >
+          <div className="text-sm font-medium">Add Repository</div>
+          <div className="space-y-2">
+            <input
+              type="text"
+              value={newRepo.name}
+              onChange={(e) => setNewRepo((p) => ({ ...p, name: e.target.value }))}
+              placeholder="Name (e.g. my-project)"
+              className="w-full px-3 py-2 rounded-md text-sm"
+              style={{ background: "var(--bg-primary)", border: "1px solid var(--border)" }}
+            />
+            <input
+              type="text"
+              value={newRepo.url}
+              onChange={(e) => setNewRepo((p) => ({ ...p, url: e.target.value }))}
+              placeholder="Git URL (e.g. git@github.com:org/repo.git)"
+              className="w-full px-3 py-2 rounded-md text-sm"
+              style={{ background: "var(--bg-primary)", border: "1px solid var(--border)" }}
+            />
+            <input
+              type="text"
+              value={newRepo.branch}
+              onChange={(e) => setNewRepo((p) => ({ ...p, branch: e.target.value }))}
+              placeholder="Branch (optional, default: main)"
+              className="w-full px-3 py-2 rounded-md text-sm"
+              style={{ background: "var(--bg-primary)", border: "1px solid var(--border)" }}
+            />
+            <button
+              onClick={handleAddRepo}
+              disabled={!newRepo.name || !newRepo.url}
+              className="px-4 py-2 rounded-md text-sm font-medium text-white"
+              style={{ background: "var(--accent-green)", opacity: !newRepo.name || !newRepo.url ? 0.5 : 1 }}
+            >
+              Add Repo
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  };
+
+  const renderMachinesCategory = () => {
+    const handleAddMachine = async () => {
+      if (!newMachine.name || !newMachine.host || !newMachine.user) return;
+      try {
+        await mutateApi("/machines", "POST", newMachine);
+        setNewMachine({ name: "", host: "", user: "ubuntu", port: 22, auth: "key" });
+        reloadMachines();
+      } catch (err: any) {
+        console.error(err.message);
+      }
+    };
+
+    const handleDeleteMachine = async (name: string) => {
+      await mutateApi(`/machines/${name}`, "DELETE");
+      reloadMachines();
+    };
+
+    const handleUpdateMachine = async (name: string) => {
+      try {
+        await mutateApi(`/machines/${name}`, "PUT", machineEdits);
+        setEditingMachine(null);
+        setMachineEdits({});
+        reloadMachines();
+      } catch (err: any) {
+        console.error(err.message);
+      }
+    };
+
+    return (
+      <div className="space-y-4 max-w-xl">
+        <div className="text-xs" style={{ color: "var(--text-muted)" }}>
+          Remote SSH hosts for deploying agents.
+        </div>
+
+        {machinesList.map((m) => (
+          <div
+            key={m.name}
+            className="rounded-lg p-4 space-y-2"
+            style={{ background: "var(--bg-secondary)", border: "1px solid var(--border)" }}
+          >
+            {editingMachine === m.name ? (
+              <div className="space-y-2">
+                <div className="text-sm font-medium">{m.name}</div>
+                <input
+                  type="text"
+                  defaultValue={m.host}
+                  onChange={(e) => setMachineEdits((p) => ({ ...p, host: e.target.value }))}
+                  placeholder="Host"
+                  className="w-full px-3 py-2 rounded-md text-sm"
+                  style={{ background: "var(--bg-primary)", border: "1px solid var(--border)" }}
+                />
+                <div className="flex gap-2">
+                  <input
+                    type="text"
+                    defaultValue={m.user}
+                    onChange={(e) => setMachineEdits((p) => ({ ...p, user: e.target.value }))}
+                    placeholder="User"
+                    className="flex-1 px-3 py-2 rounded-md text-sm"
+                    style={{ background: "var(--bg-primary)", border: "1px solid var(--border)" }}
+                  />
+                  <input
+                    type="number"
+                    defaultValue={m.port}
+                    onChange={(e) => setMachineEdits((p) => ({ ...p, port: Number(e.target.value) }))}
+                    placeholder="Port"
+                    className="w-20 px-3 py-2 rounded-md text-sm"
+                    style={{ background: "var(--bg-primary)", border: "1px solid var(--border)" }}
+                  />
+                </div>
+                <textarea
+                  onChange={(e) => setMachineEdits((p) => ({ ...p, ssh_key: e.target.value }))}
+                  placeholder="SSH Private Key (paste to replace)"
+                  rows={4}
+                  className="w-full px-3 py-2 rounded-md text-sm font-mono"
+                  style={{ background: "var(--bg-primary)", border: "1px solid var(--border)", resize: "vertical" }}
+                />
+                <div className="flex gap-2">
+                  <button
+                    onClick={() => handleUpdateMachine(m.name)}
+                    className="px-3 py-1.5 rounded-md text-xs font-medium text-white"
+                    style={{ background: "var(--accent-green)" }}
+                  >
+                    Save
+                  </button>
+                  <button
+                    onClick={() => { setEditingMachine(null); setMachineEdits({}); }}
+                    className="px-3 py-1.5 rounded-md text-xs font-medium"
+                    style={{ background: "var(--bg-tertiary)" }}
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <div className="flex items-start justify-between gap-3">
+                <div className="space-y-1 min-w-0">
+                  <div className="text-sm font-medium">{m.name}</div>
+                  <div className="text-xs" style={{ color: "var(--text-muted)" }}>
+                    {m.user}@{m.host}:{m.port}
+                  </div>
+                  <div className="text-xs" style={{ color: "var(--text-muted)" }}>
+                    Auth: {m.auth} {m.ssh_key === MASKED ? "(key configured)" : ""}
+                  </div>
+                </div>
+                <div className="flex gap-1 shrink-0">
+                  <button
+                    onClick={() => { setEditingMachine(m.name); setMachineEdits({ host: m.host, user: m.user, port: m.port }); }}
+                    className="px-2 py-1 rounded text-xs font-medium"
+                    style={{ background: "var(--bg-tertiary)", color: "var(--text-secondary)" }}
+                  >
+                    Edit
+                  </button>
+                  <button
+                    onClick={() => handleDeleteMachine(m.name)}
+                    className="px-2 py-1 rounded text-xs font-medium"
+                    style={{ background: "var(--bg-tertiary)", color: "var(--text-secondary)" }}
+                  >
+                    Remove
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        ))}
+
+        <div
+          className="rounded-lg p-4 space-y-3"
+          style={{ background: "var(--bg-secondary)", border: "1px solid var(--border)" }}
+        >
+          <div className="text-sm font-medium">Add Machine</div>
+          <div className="space-y-2">
+            <input
+              type="text"
+              value={newMachine.name ?? ""}
+              onChange={(e) => setNewMachine((p) => ({ ...p, name: e.target.value }))}
+              placeholder="Name (e.g. gpu-server)"
+              className="w-full px-3 py-2 rounded-md text-sm"
+              style={{ background: "var(--bg-primary)", border: "1px solid var(--border)" }}
+            />
+            <input
+              type="text"
+              value={newMachine.host ?? ""}
+              onChange={(e) => setNewMachine((p) => ({ ...p, host: e.target.value }))}
+              placeholder="Host (e.g. 10.0.1.5 or my-server.com)"
+              className="w-full px-3 py-2 rounded-md text-sm"
+              style={{ background: "var(--bg-primary)", border: "1px solid var(--border)" }}
+            />
+            <div className="flex gap-2">
+              <input
+                type="text"
+                value={newMachine.user ?? "ubuntu"}
+                onChange={(e) => setNewMachine((p) => ({ ...p, user: e.target.value }))}
+                placeholder="User"
+                className="flex-1 px-3 py-2 rounded-md text-sm"
+                style={{ background: "var(--bg-primary)", border: "1px solid var(--border)" }}
+              />
+              <input
+                type="number"
+                value={newMachine.port ?? 22}
+                onChange={(e) => setNewMachine((p) => ({ ...p, port: Number(e.target.value) }))}
+                placeholder="Port"
+                className="w-20 px-3 py-2 rounded-md text-sm"
+                style={{ background: "var(--bg-primary)", border: "1px solid var(--border)" }}
+              />
+            </div>
+            <textarea
+              value={newMachine.ssh_key ?? ""}
+              onChange={(e) => setNewMachine((p) => ({ ...p, ssh_key: e.target.value }))}
+              placeholder="SSH Private Key"
+              rows={4}
+              className="w-full px-3 py-2 rounded-md text-sm font-mono"
+              style={{ background: "var(--bg-primary)", border: "1px solid var(--border)", resize: "vertical" }}
+            />
+            <button
+              onClick={handleAddMachine}
+              disabled={!newMachine.name || !newMachine.host || !newMachine.user}
+              className="px-4 py-2 rounded-md text-sm font-medium text-white"
+              style={{ background: "var(--accent-green)", opacity: !newMachine.name || !newMachine.host ? 0.5 : 1 }}
+            >
+              Add Machine
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  };
+
   // For AI category, use special rendering
   const renderSettings = () => {
     if (activeCategory === "ai") return renderAICategory();
+    if (activeCategory === "agent") return renderAgentCategory();
+    if (activeCategory === "repos") return renderReposCategory();
+    if (activeCategory === "machines") return renderMachinesCategory();
 
     const visibleSettings = filtered.filter((s) => !OAUTH_MANAGED_KEYS.has(s.key));
 

@@ -1,34 +1,37 @@
 import type { Subprocess } from "bun";
 import { db } from "../db/client.js";
+import { provisionAgent, gatewayPort } from "./provision-openclaw.js";
 
 const localProcesses = new Map<string, Subprocess>();
 
-export function startLocal(name: string, role: string): Subprocess {
+export async function startLocal(name: string, role: string): Promise<Subprocess> {
   const existing = localProcesses.get(name);
   if (existing) {
     existing.kill();
     localProcesses.delete(name);
   }
 
-  const proc = Bun.spawn(["bun", "packages/agent/src/index.ts"], {
-    cwd: process.cwd(),
-    env: {
-      ...process.env,
-      AGENCY_AGENT_NAME: name,
-      AGENCY_ROLE: role,
+  // Ensure config + auth are written before starting
+  await provisionAgent(name, role, "local");
+
+  const port = gatewayPort(name, "local");
+  const proc = Bun.spawn(
+    ["openclaw", "--profile", name, "gateway", "run", "--port", String(port)],
+    {
+      cwd: process.cwd(),
+      env: { ...process.env },
+      stdout: "inherit",
+      stderr: "inherit",
     },
-    stdout: "inherit",
-    stderr: "inherit",
-  });
+  );
 
   localProcesses.set(name, proc);
 
-  // Clean up map entry and update DB status when process exits
   proc.exited.then((code) => {
     if (localProcesses.get(name) === proc) {
       localProcesses.delete(name);
     }
-    console.log(`[process] ${name} exited with code ${code}`);
+    console.log(`[process] ${name} gateway exited with code ${code}`);
     db.updateTable("agents").set({ status: "idle" }).where("name", "=", name).execute().catch(console.error);
   });
 

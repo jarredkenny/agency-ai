@@ -4,7 +4,7 @@
 
 Agency is an orchestrator + worker platform for autonomous software development. An orchestrator agent breaks down work into tasks, assigns them to worker agents, and reviews results. Workers claim tasks, write code, run tests, and report back. You manage everything from a dashboard or CLI.
 
-Each agent is an [OpenClaw](https://openclaw.ai/) instance with full shell access, file I/O, and browser control. Agency adds the coordination layer on top: task routing, inter-agent messaging, a skill marketplace, role-based configuration, knowledge sharing, and fleet management across local, Docker, and EC2 deployments.
+Each agent is an [OpenClaw](https://openclaw.ai/) instance with full shell access, file I/O, and browser control. Agency adds the coordination layer on top: task routing, inter-agent messaging, a skill marketplace, role-based configuration, knowledge sharing, per-agent skill selection, and fleet management across local, Docker, and remote SSH deployments.
 
 ![Mission Control](docs/images/agency_ui_mission_control.png)
 
@@ -27,7 +27,7 @@ Each agent is an [OpenClaw](https://openclaw.ai/) instance with full shell acces
 
 - **Multi-agent coordination** — Orchestrator decomposes work, workers execute in parallel, task comments serve as the communication channel
 - **Skill marketplace** — Browse and install skills from [anthropics/skills](https://github.com/anthropics/skills), [obra/superpowers](https://github.com/obra/superpowers), [ComposioHQ/awesome-claude-skills](https://github.com/ComposioHQ/awesome-claude-skills), or any repo that follows the convention
-- **Deploy anywhere** — Local (Bun subprocess), Docker, or EC2 with automatic reverse SSH tunnels
+- **Deploy anywhere** — Local (Bun subprocess), Docker, or any remote SSH host with automatic reverse tunnels
 - **Knowledge base** — Agents learn facts during work and share them with the team
 - **Role system** — Configure agent behavior with Soul, Identity, Tools, Agents, and Heartbeat prompts per role
 - **Claude Max OAuth** — Use your Claude subscription directly, no API key required
@@ -76,7 +76,9 @@ Created by `agency init`. This is the only directory Agency writes to in your pr
 ```
 .agency/
 ├── agency.db       # SQLite database (all state)
-└── fleet.json      # Agent fleet config
+├── fleet.json      # Agent fleet config
+├── repos.json      # Git repos for agent workspaces
+└── machines.json   # Remote SSH host configurations
 ```
 
 Everything else — settings, skills, role configs — lives in the database, editable via the dashboard or CLI.
@@ -91,7 +93,7 @@ agency ps                            List agents
 agency start <name>                  Start an agent
 agency stop <name>                   Stop an agent
 agency logs <name>                   Tail agent logs
-agency ssh <name>                    SSH into agent (EC2 only)
+agency ssh <name>                    SSH into agent (remote only)
 agency tasks create <title> [flags]  Create a task
 agency tasks list [--status S]       List tasks
 agency tasks ready                   Show your assigned tasks
@@ -146,6 +148,8 @@ agency --version                     Show version
 | GET | `/skills/import/preview?url=` | Preview importable skills from a repo |
 | POST | `/skills/import` | Import skills from a GitHub repo |
 | GET/PUT/DELETE | `/role-configs/:role/:type` | Role configuration docs |
+| GET/POST/DELETE | `/repos` | Git repo configuration |
+| GET/POST/PUT/DELETE | `/machines` | Remote SSH machine configuration |
 
 ## Database Schema
 
@@ -169,7 +173,7 @@ Eight views accessible from the top nav:
 
 - **Mission Control** — Agent roster + task kanban board + live activity feed
 - **Agent Config** — Browse agent workspace files (served from role_configs in DB)
-- **Settings** — Categorized editor for Identity, AI Provider, AWS, and SSH configuration
+- **Settings** — Categorized editor for Identity, AI Provider, Agent Defaults, Repos, and Machines
 - **Skills** — Browse installed skills, discover and install from public repos, or create custom skills
 - **Roles** — Markdown editor for role configs (Heartbeat, Tools, Agents, etc.)
 - **Knowledge** — Key-value knowledge base editor with tag filtering and search
@@ -191,10 +195,14 @@ Configure each agent's role-specific prompts. Select an agent from the sidebar t
 
 Sensitive values (API keys, SSH keys, credentials) are masked in the API and revealed on demand in the UI. AI provider settings support both direct API key entry and Claude Max OAuth (import tokens from Claude Code with one click).
 
+Categories: **Identity**, **AI Provider**, **Agent Defaults**, **Repos**, and **Machines**.
+
+- **Repos** — Configure git repositories that agents clone as workspaces. Each repo has a name, URL, and optional branch.
+- **Machines** — Configure remote SSH hosts for deploying agents. Each machine has a name, host, user, port, and SSH key. Keys are masked in the API and UI.
+
 | | |
 |---|---|
 | ![Identity](docs/images/agency_ui_identity_settings.png) | ![AI Provider](docs/images/agency_ui_ai_prodivder_settings.png) |
-| ![AWS](docs/images/agency_ui_aws_settings.png) | |
 
 ### Skills
 
@@ -246,7 +254,8 @@ Every agent in Agency is an [OpenClaw](https://openclaw.ai/) instance. OpenClaw 
 
 - **Role configs** — each agent gets injected with role-specific prompts (Soul, Identity, Tools, Agents, Heartbeat) that define its behavior
 - **Task coordination** — agents poll the Agency API for assigned work, post progress via task comments, and transition tasks through the workflow
-- **Fleet management** — deploy agents locally (Bun subprocess), via Docker, or on EC2 with automatic SSH tunnels
+- **Fleet management** — deploy agents locally (Bun subprocess), via Docker, or on any remote SSH host with automatic tunnels
+- **Per-agent skills** — select which skills each agent receives from the skill chooser in the agent detail panel
 
 Agents can run any model OpenClaw supports (Claude, GPT, local models), configured through the AI Provider settings.
 
@@ -256,33 +265,28 @@ Agents can run any model OpenClaw supports (Claude, GPT, local models), configur
 |------|-------------|
 | **Local** | Spawns a Bun subprocess on the host machine. Agent talks to API at `localhost:3100` directly. |
 | **Docker** | Runs `docker compose up` for the agent container. |
-| **EC2** | Opens a reverse SSH tunnel from the remote instance back to the host, so the agent's `agency` CLI hits `localhost:3100` on the remote machine which tunnels back to the host API. |
+| **Remote** | Connects to a configured SSH machine, deploys the agent, and opens a reverse tunnel back to the host API. |
 
-#### EC2 Agent Setup
+#### Remote Agent Setup
 
-1. Configure SSH in Settings → SSH (paste your private key, set the username)
-2. Add `host` to the agent's entry in `.agency/fleet.json`:
-
-```json
-{
-  "agents": {
-    "nova": { "role": "implementer", "location": "ec2", "host": "54.123.45.67" }
-  }
-}
-```
-
+1. Add a machine in **Settings → Machines** (host, user, port, SSH private key)
+2. Create an agent with location **Remote** and select the machine from the dropdown
 3. Click **Deploy** in the dashboard (or `agency start nova`)
 
 The daemon opens `ssh -R 3100:localhost:3100 user@host -N` — a persistent reverse tunnel with auto-reconnect. The remote agent's CLI commands (`agency tasks list`, `agency msg`, etc.) hit `localhost:3100` which forwards through the tunnel to the host API. No agent-side configuration needed.
 
 On stop, the tunnel is torn down. On daemon shutdown, all tunnels are cleaned up.
 
-You can also SSH directly into any EC2 agent:
+You can also SSH directly into any remote agent:
 
 ```bash
 agency ssh nova          # interactive shell
 agency ssh nova ls -la   # run a command
 ```
+
+### Per-Agent Skills
+
+Each agent can be configured to receive only a subset of installed skills. In the agent detail panel, use the skill chooser to select which skills the agent should have. If no skills are selected, the agent receives all skills (default behavior). Selected skills are stored in `fleet.json` and synced to the agent on deploy.
 
 ### Task Lifecycle
 

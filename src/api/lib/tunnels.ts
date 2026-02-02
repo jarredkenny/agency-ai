@@ -5,11 +5,11 @@ const tunnels = new Map<string, Subprocess>();
 
 const API_PORT = Number(process.env.PORT ?? 3100);
 
-export async function startTunnel(name: string, host: string): Promise<void> {
+export async function startTunnel(name: string, host: string, machineName?: string): Promise<void> {
   // Kill existing tunnel if any
   stopTunnel(name);
 
-  const { keyPath, user } = await getSSHConfig();
+  const { keyPath, user, port: sshPort } = await getSSHConfig(machineName);
 
   const args = [
     "ssh",
@@ -18,6 +18,7 @@ export async function startTunnel(name: string, host: string): Promise<void> {
     "-o", "ServerAliveInterval=30",
     "-o", "ServerAliveCountMax=3",
     "-o", "ExitOnForwardFailure=yes",
+    "-p", String(sshPort),
     "-N",               // no command, just tunnel
     "-R", `${API_PORT}:localhost:${API_PORT}`,  // reverse tunnel: remote:3100 -> local:3100
     `${user}@${host}`,
@@ -40,7 +41,7 @@ export async function startTunnel(name: string, host: string): Promise<void> {
     setTimeout(() => {
       // Only restart if no new tunnel was created
       if (!tunnels.has(name)) {
-        startTunnel(name, host).catch((err) =>
+        startTunnel(name, host, machineName).catch((err) =>
           console.error(`[tunnel] failed to restart tunnel for ${name}:`, err.message)
         );
       }

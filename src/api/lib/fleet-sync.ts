@@ -13,6 +13,8 @@ interface FleetAgent {
   role: string;
   location?: string;
   host?: string;
+  machine?: string;
+  skills?: string[];
   slackBotToken?: string;
   slackAppToken?: string;
 }

@@ -16,51 +16,54 @@ export default async function ssh(args: string[]) {
     process.exit(1);
   }
 
-  if (agent.location !== "ec2") {
-    console.error(`SSH is only supported for EC2 agents. "${name}" is ${agent.location ?? "local"}.`);
+  if (agent.location !== "remote") {
+    console.error(`SSH is only supported for remote agents. "${name}" is ${agent.location ?? "local"}.`);
     process.exit(1);
   }
 
-  // Get SSH settings
-  const settings = await api("/settings?category=ssh");
-  const sshConfig: Record<string, string> = {};
-  for (const s of settings) {
-    sshConfig[s.key] = s.value;
-  }
-
-  const privateKey = sshConfig["ssh.private_key"];
-  const user = sshConfig["ssh.user"] || "ubuntu";
-
-  if (!privateKey) {
-    console.error("SSH private key not configured. Set it in Settings → SSH.");
+  const machineName = agent.machine;
+  if (!machineName) {
+    console.error(`No machine configured for "${name}". Select a machine in the agent settings.`);
     process.exit(1);
   }
 
-  // Get host from fleet.json via agent detail or settings
-  // The agent's host should be in fleet.json
-  const configRes = await api("/settings?category=aws");
-  // We need the fleet host — fetch it from the API or read fleet.json directly
-  let host = "";
+  // Get machine config from machines API
+  const machines = await api("/machines");
+  const machine = machines.find((m: any) => m.name === machineName);
+  if (!machine) {
+    console.error(`Machine "${machineName}" not found. Configure it in Settings → Machines.`);
+    process.exit(1);
+  }
+
+  // For SSH key, we need the raw key — read from machines.json directly
+  const machinesPath = path.resolve(process.cwd(), ".agency", "machines.json");
+  let rawMachines: any[] = [];
   try {
-    const fleetPath = path.resolve(process.cwd(), ".agency", "fleet.json");
-    const fleet = JSON.parse(fs.readFileSync(fleetPath, "utf-8"));
-    host = fleet.agents?.[name]?.host ?? "";
-  } catch {}
+    rawMachines = JSON.parse(fs.readFileSync(machinesPath, "utf-8"));
+  } catch {
+    console.error("Could not read machines.json");
+    process.exit(1);
+  }
 
-  if (!host) {
-    console.error(`No host configured for "${name}". Add "host" to fleet.json for this agent.`);
+  const rawMachine = rawMachines.find((m: any) => m.name === machineName);
+  if (!rawMachine?.ssh_key) {
+    console.error(`SSH key not configured for machine "${machineName}".`);
     process.exit(1);
   }
 
   // Write key to temp file
   const keyDir = path.join(os.tmpdir(), "agency-ssh");
   fs.mkdirSync(keyDir, { recursive: true, mode: 0o700 });
-  const keyPath = path.join(keyDir, "agent_key");
-  fs.writeFileSync(keyPath, privateKey + "\n", { mode: 0o600 });
+  const keyPath = path.join(keyDir, `key_${machineName}`);
+  fs.writeFileSync(keyPath, rawMachine.ssh_key + "\n", { mode: 0o600 });
+
+  const user = rawMachine.user || "ubuntu";
+  const host = rawMachine.host;
+  const port = String(rawMachine.port || 22);
 
   // Exec ssh
   const proc = Bun.spawn(
-    ["ssh", "-i", keyPath, "-o", "StrictHostKeyChecking=no", `${user}@${host}`, ...args.slice(1)],
+    ["ssh", "-i", keyPath, "-p", port, "-o", "StrictHostKeyChecking=no", `${user}@${host}`, ...args.slice(1)],
     { stdout: "inherit", stderr: "inherit", stdin: "inherit" }
   );
   const code = await proc.exited;

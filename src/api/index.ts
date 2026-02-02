@@ -14,6 +14,8 @@ import { settings } from "./routes/settings.js";
 import { oauth } from "./routes/oauth.js";
 import { skills } from "./routes/skills.js";
 import { roleConfigs } from "./routes/role-configs.js";
+import { repos } from "./routes/repos.js";
+import { machines } from "./routes/machines.js";
 
 const app = new Hono();
 
@@ -43,6 +45,8 @@ app.route("/settings", settings);
 app.route("/oauth", oauth);
 app.route("/skills", skills);
 app.route("/role-configs", roleConfigs);
+app.route("/repos", repos);
+app.route("/machines", machines);
 
 // Serve the dashboard static export
 const dashboardPaths = [

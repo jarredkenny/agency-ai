@@ -4,50 +4,62 @@ import { resolveAgent } from "../lib/resolve-agent.js";
 import {
   writeAgentToFleet,
   removeAgentFromFleet,
+  readFleet,
 } from "../lib/fleet-sync.js";
 import { startLocal, stopLocal } from "../lib/processes.js";
 import { stopTunnel } from "../lib/tunnels.js";
-import { readFleet } from "../lib/fleet-sync.js";
-import { syncSkills, pushSkillsToAgent } from "../lib/sync-skills.js";
-import { deployEC2, stopEC2 } from "../lib/ec2-deploy.js";
-import { provisionAuth } from "../lib/provision-auth.js";
+import { pushSkillsToAgent } from "../lib/sync-skills.js";
+import { deployRemote, stopRemote } from "../lib/remote-deploy.js";
+import { provisionAgent } from "../lib/provision-openclaw.js";
+import { listRoles, getRoleConfig } from "../lib/fs-store.js";
 
 const NAME_RE = /^[a-z][a-z0-9-]{1,30}$/;
-const VALID_LOCATIONS = new Set(["docker", "ec2", "local"]);
+const VALID_LOCATIONS = new Set(["docker", "remote", "local"]);
 
-// Map of allowed file names to role_config config_type values
+// Map of allowed file names to config_type values
 const FILE_TO_CONFIG_TYPE: Record<string, string> = {
   "SOUL.md": "soul",
   "USER.md": "identity",
   "AGENTS.md": "agents",
-  "MEMORY.md": "soul", // memory is part of soul for now
+  "MEMORY.md": "soul",
   "TOOLS.md": "tools",
 };
 
 export const agents = new Hono();
 
-// List available roles (from DB role_configs)
+// List available roles (from filesystem)
 agents.get("/roles", async (c) => {
-  const rows = await db
-    .selectFrom("role_configs")
-    .select("role")
-    .distinct()
-    .execute();
-  return c.json(rows.map((r) => r.role));
+  return c.json(listRoles());
 });
 
 agents.get("/", async (c) => {
   const rows = await db.selectFrom("agents").selectAll().execute();
-  return c.json(rows);
+  // Enrich with fleet data (machine, skills)
+  const fleet = readFleet();
+  const enriched = rows.map((r) => {
+    const fa = fleet.agents[r.name];
+    return {
+      ...r,
+      machine: fa?.machine ?? null,
+      skills: fa?.skills ?? [],
+    };
+  });
+  return c.json(enriched);
 });
 
 agents.get("/:name", async (c) => {
   const agent = await resolveAgent(c.req.param("name"));
   if (!agent) return c.json({ error: "not found" }, 404);
-  return c.json(agent);
+  const fleet = readFleet();
+  const fa = fleet.agents[agent.name];
+  return c.json({
+    ...agent,
+    machine: fa?.machine ?? null,
+    skills: fa?.skills ?? [],
+  });
 });
 
-// Get agent config file from DB
+// Get agent config file from filesystem
 agents.get("/:name/files/:filename", async (c) => {
   const filename = c.req.param("filename");
   const configType = FILE_TO_CONFIG_TYPE[filename];
@@ -57,17 +69,11 @@ agents.get("/:name/files/:filename", async (c) => {
   const agent = await resolveAgent(c.req.param("name"));
   if (!agent) return c.json({ error: "not found" }, 404);
 
-  const config = await db
-    .selectFrom("role_configs")
-    .where("role", "=", agent.role)
-    .where("config_type", "=", configType)
-    .selectAll()
-    .executeTakeFirst();
-
-  if (!config) {
+  const content = getRoleConfig(agent.role, configType);
+  if (content === null) {
     return c.json({ error: "file not found" }, 404);
   }
-  return c.json({ filename, content: config.content });
+  return c.json({ filename, content });
 });
 
 // Get agent's role config by config_type directly
@@ -75,15 +81,10 @@ agents.get("/:name/config/:configType", async (c) => {
   const agent = await resolveAgent(c.req.param("name"));
   if (!agent) return c.json({ error: "not found" }, 404);
 
-  const config = await db
-    .selectFrom("role_configs")
-    .where("role", "=", agent.role)
-    .where("config_type", "=", c.req.param("configType"))
-    .selectAll()
-    .executeTakeFirst();
-
-  if (!config) return c.json({ error: "not found" }, 404);
-  return c.json(config);
+  const configType = c.req.param("configType");
+  const content = getRoleConfig(agent.role, configType);
+  if (content === null) return c.json({ error: "not found" }, 404);
+  return c.json({ role: agent.role, config_type: configType, content });
 });
 
 // Create agent
@@ -92,6 +93,7 @@ agents.post("/", async (c) => {
     name: string;
     role: string;
     location: string;
+    machine?: string;
     slack_bot_token?: string;
     slack_app_token?: string;
   }>();
@@ -100,7 +102,7 @@ agents.post("/", async (c) => {
     return c.json({ error: "invalid name: must match /^[a-z][a-z0-9-]{1,30}$/" }, 400);
   }
   if (!VALID_LOCATIONS.has(body.location)) {
-    return c.json({ error: "invalid location: must be docker, ec2, or local" }, 400);
+    return c.json({ error: "invalid location: must be docker, remote, or local" }, 400);
   }
 
   const existing = await db
@@ -116,6 +118,7 @@ agents.post("/", async (c) => {
   await writeAgentToFleet(body.name, {
     role: body.role,
     location: body.location,
+    ...(body.machine ? { machine: body.machine } : {}),
     ...(body.slack_bot_token ? { slackBotToken: body.slack_bot_token } : {}),
     ...(body.slack_app_token ? { slackAppToken: body.slack_app_token } : {}),
   });
@@ -150,6 +153,8 @@ agents.patch("/:name", async (c) => {
     current_task?: string | null;
     role?: string;
     location?: string;
+    machine?: string | null;
+    skills?: string[];
     slack_bot_token?: string | null;
     slack_app_token?: string | null;
   }>();
@@ -172,11 +177,17 @@ agents.patch("/:name", async (c) => {
 
   // Sync config fields to fleet.json
   if (body.role !== undefined || body.location !== undefined ||
+      body.machine !== undefined || body.skills !== undefined ||
       body.slack_bot_token !== undefined ||
       body.slack_app_token !== undefined) {
+    const fleet = readFleet();
+    const existing = fleet.agents[agent.name] ?? { role: updated.role, location: updated.location ?? "local" };
     await writeAgentToFleet(agent.name, {
+      ...existing,
       role: updated.role,
       location: updated.location ?? "local",
+      ...(body.machine !== undefined ? { machine: body.machine ?? undefined } : {}),
+      ...(body.skills !== undefined ? { skills: body.skills } : {}),
       ...(updated.slack_bot_token ? { slackBotToken: updated.slack_bot_token } : {}),
       ...(updated.slack_app_token ? { slackAppToken: updated.slack_app_token } : {}),
     });
@@ -212,17 +223,15 @@ agents.post("/:name/deploy", async (c) => {
   const agent = await resolveAgent(c.req.param("name"));
   if (!agent) return c.json({ error: "not found" }, 404);
 
-  await syncSkills();
-
-  // Provision OpenClaw auth credentials before starting
+  // Provision OpenClaw config + auth before starting
   try {
-    await provisionAuth(agent.name);
+    await provisionAgent(agent.name, agent.role, agent.location ?? "local");
   } catch (err: any) {
-    return c.json({ error: `Auth provisioning failed: ${err.message}` }, 500);
+    return c.json({ error: `Provisioning failed: ${err.message}` }, 500);
   }
 
   if (agent.location === "local") {
-    startLocal(agent.name, agent.role);
+    await startLocal(agent.name, agent.role);
     await db
       .updateTable("agents")
       .where("id", "=", agent.id)
@@ -231,11 +240,13 @@ agents.post("/:name/deploy", async (c) => {
     return c.json({ status: "deployed", method: "local" });
   }
 
-  if (agent.location === "ec2") {
+  if (agent.location === "remote") {
+    const fleet = readFleet();
+    const machine = fleet.agents[agent.name]?.machine;
     try {
-      await deployEC2(agent.name, agent.role);
+      await deployRemote(agent.name, agent.role, machine);
     } catch (err: any) {
-      return c.json({ error: `EC2 deploy failed: ${err.message}` }, 500);
+      return c.json({ error: `Remote deploy failed: ${err.message}` }, 500);
     }
 
     await db
@@ -243,7 +254,7 @@ agents.post("/:name/deploy", async (c) => {
       .where("id", "=", agent.id)
       .set({ status: "active", updated_at: new Date().toISOString() })
       .execute();
-    return c.json({ status: "deployed", method: "ec2", tunnel: true });
+    return c.json({ status: "deployed", method: "remote", tunnel: true });
   }
 
   if (agent.location === "docker") {
@@ -255,13 +266,9 @@ agents.post("/:name/deploy", async (c) => {
     if (exitCode !== 0) {
       return c.json({ error: "docker compose up failed" }, 500);
     }
-    // Copy auth credentials into running container
-    const authSrc = `${process.env.HOME}/.openclaw-${agent.name}/agents/main/agent/auth-profiles.json`;
-    const cpProc = Bun.spawn(
-      ["docker", "cp", authSrc, `agent-${agent.name}:/root/.openclaw/agents/main/agent/auth-profiles.json`],
-      { cwd: process.cwd(), stdout: "inherit", stderr: "inherit" },
-    );
-    await cpProc.exited; // best-effort, don't fail deploy if cp fails
+    // Push config + auth into running container
+    const { pushToDocker } = await import("../lib/provision-openclaw.js");
+    await pushToDocker(agent.name, agent.role);
     await db
       .updateTable("agents")
       .where("id", "=", agent.id)
@@ -308,8 +315,10 @@ agents.post("/:name/stop", async (c) => {
     return c.json({ status: "stopped" });
   }
 
-  if (agent.location === "ec2") {
-    await stopEC2(agent.name);
+  if (agent.location === "remote") {
+    const fleet = readFleet();
+    const machine = fleet.agents[agent.name]?.machine;
+    await stopRemote(agent.name, machine);
     await db
       .updateTable("agents")
       .where("id", "=", agent.id)

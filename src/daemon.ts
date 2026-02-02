@@ -18,33 +18,52 @@ const server = Bun.serve({
 });
 console.log(`[daemon] API listening on http://${server.hostname}:${server.port}`);
 
-// Run migrations on startup
+// Run migrations + seed new settings on startup
 const { runMigrations } = await import("./api/db/migrate.js");
 await runMigrations();
+const { seedDefaults } = await import("./api/db/seed.js");
+await seedDefaults();
 
-// Initial skill sync + periodic push to agents
-const { syncSkills, pushSkillsToAllAgents } = await import("./api/lib/sync-skills.js");
-const { provisionAuth } = await import("./api/lib/provision-auth.js");
-await syncSkills();
+// Push skills to remote agents periodically
+const { pushSkillsToAllAgents } = await import("./api/lib/sync-skills.js");
+const { provisionAgent, pushToRemote, pushToDocker } = await import("./api/lib/provision-openclaw.js");
 
-// Re-provision auth for all active agents periodically (picks up credential changes)
-async function provisionAllAgentAuth() {
+// Full config + auth + skills sync for all active agents
+async function syncAllAgents() {
   const { db } = await import("./api/db/client.js");
+  const { readFleet } = await import("./api/lib/fleet-sync.js");
   const agents = await db.selectFrom("agents").where("status", "=", "active").selectAll().execute();
+  const fleet = readFleet();
+
   for (const a of agents) {
+    const location = a.location ?? "local";
     try {
-      await provisionAuth(a.name);
+      await provisionAgent(a.name, a.role, location);
     } catch {
-      // Non-fatal — agent may still work with existing credentials
+      // Non-fatal — agent may still work with existing config
     }
+
+    // Push to remote/docker agents
+    if (location === "remote") {
+      const machine = fleet.agents[a.name]?.machine;
+      if (machine) {
+        try {
+          const { getSSHConfig } = await import("./api/lib/ssh.js");
+          const { host } = await getSSHConfig(machine);
+          await pushToRemote(a.name, a.role, host, machine);
+        } catch {}
+      }
+    } else if (location === "docker") {
+      try { await pushToDocker(a.name, a.role); } catch {}
+    }
+    // Local agents: openclaw watches the filesystem, no push needed
   }
 }
 
 setInterval(async () => {
   try {
-    await syncSkills();
     await pushSkillsToAllAgents();
-    await provisionAllAgentAuth();
+    await syncAllAgents();
   } catch (err) {
     console.error("[daemon] sync error:", err);
   }
