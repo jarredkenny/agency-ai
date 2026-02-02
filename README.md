@@ -1,35 +1,37 @@
-# Agency — Multi-Agent AI Development Platform
+# Agency
 
-A scalable orchestrator + worker architecture for autonomous AI software development. Built on top of [OpenClaw](https://openclaw.ai/) ([GitHub](https://github.com/openclaw/openclaw)) — each deployed agent is an OpenClaw instance with full shell access, file I/O, and browser control. Agency adds the coordination layer: task assignment, inter-agent messaging, role-based configuration, and a dashboard to manage it all.
+**Run a team of AI agents that write code together.**
+
+Agency is an orchestrator + worker platform for autonomous software development. An orchestrator agent breaks down work into tasks, assigns them to worker agents, and reviews results. Workers claim tasks, write code, run tests, and report back. You manage everything from a dashboard or CLI.
+
+Each agent is an [OpenClaw](https://openclaw.ai/) instance with full shell access, file I/O, and browser control. Agency adds the coordination layer on top: task routing, inter-agent messaging, a skill marketplace, role-based configuration, knowledge sharing, and fleet management across local, Docker, and EC2 deployments.
+
+![Mission Control](docs/images/agency_ui_mission_control.png)
 
 ```
-                         ┌──────────────┐
-                         │    Human     │
-                         │  (dashboard) │
-                         └──────┬───────┘
-                                │
-                                ▼
-                    ┌───────────────────────┐
-                    │     Orchestrator      │
-                    │    (OpenClaw agent)   │
-                    │                       │
-                    │  Investigates → Plans  │
-                    │  Creates tasks → Delegates
-                    └───────────┬───────────┘
-                                │ Tasks (via API)
-                    ┌───────────┼───────────┐
-                    ▼           ▼           ▼
-              ┌──────────┐ ┌──────────┐ ┌──────────┐
-              │ Worker A │ │ Worker B │ │ Worker C │
-              │ (OpenClaw)│ │(OpenClaw)│ │(OpenClaw)│
-              │          │ │          │ │          │
-              │ Claims → │ │          │ │          │
-              │ Codes  → │ │   ...    │ │   ...    │
-              │ Ships    │ │          │ │          │
-              └──────────┘ └──────────┘ └──────────┘
+          You (dashboard / CLI)
+                  │
+                  ▼
+           ┌─────────────┐
+           │ Orchestrator │  Investigates → Plans → Delegates
+           └──────┬──────┘
+                  │ tasks via API
+        ┌─────────┼─────────┐
+        ▼         ▼         ▼
+   ┌─────────┐ ┌─────────┐ ┌─────────┐
+   │ Worker A│ │ Worker B│ │ Worker C│   Claims → Codes → Ships
+   └─────────┘ └─────────┘ └─────────┘
 ```
 
-![Mission Control](https://raw.githubusercontent.com/jarredkenny/agency-ai/main/docs/images/agency_ui_mission_control.png)
+### Highlights
+
+- **Multi-agent coordination** — Orchestrator decomposes work, workers execute in parallel, task comments serve as the communication channel
+- **Skill marketplace** — Browse and install skills from [anthropics/skills](https://github.com/anthropics/skills), [obra/superpowers](https://github.com/obra/superpowers), [ComposioHQ/awesome-claude-skills](https://github.com/ComposioHQ/awesome-claude-skills), or any repo that follows the convention
+- **Deploy anywhere** — Local (Bun subprocess), Docker, or EC2 with automatic reverse SSH tunnels
+- **Knowledge base** — Agents learn facts during work and share them with the team
+- **Role system** — Configure agent behavior with Soul, Identity, Tools, Agents, and Heartbeat prompts per role
+- **Claude Max OAuth** — Use your Claude subscription directly, no API key required
+- **Single binary** — `bun install -g @jx0/agency` — API, dashboard, and CLI in one package
 
 ## Install
 
@@ -81,7 +83,7 @@ Everything else — settings, skills, role configs — lives in the database, ed
 
 ## CLI Reference
 
-![agency ps](https://raw.githubusercontent.com/jarredkenny/agency-ai/main/docs/images/agency_cli_ps.png)
+![agency ps](docs/images/agency_cli_ps.png)
 
 ```
 agency init                          Set up .agency/ in current directory
@@ -139,7 +141,10 @@ agency --version                     Show version
 | GET/POST | `/documents` | Documents |
 | GET/PUT | `/documents/:id` | Document details/update |
 | GET/PUT/DELETE | `/settings` | Settings (key-value) |
-| GET/POST/PUT/DELETE | `/skills` | Skills (markdown docs) |
+| GET/POST/PUT/DELETE | `/skills` | Skills CRUD |
+| GET | `/skills/available` | List skills from public repos |
+| GET | `/skills/import/preview?url=` | Preview importable skills from a repo |
+| POST | `/skills/import` | Import skills from a GitHub repo |
 | GET/PUT/DELETE | `/role-configs/:role/:type` | Role configuration docs |
 
 ## Database Schema
@@ -160,17 +165,27 @@ All state lives in `.agency/agency.db` (SQLite):
 
 ## Dashboard
 
-Seven views accessible from the top nav:
+Eight views accessible from the top nav:
 
 - **Mission Control** — Agent roster + task kanban board + live activity feed
 - **Agent Config** — Browse agent workspace files (served from role_configs in DB)
 - **Settings** — Categorized editor for Identity, AI Provider, AWS, and SSH configuration
-- **Skills** — Markdown editor for team skills
+- **Skills** — Browse installed skills, discover and install from public repos, or create custom skills
 - **Roles** — Markdown editor for role configs (Heartbeat, Tools, Agents, etc.)
 - **Knowledge** — Key-value knowledge base editor with tag filtering and search
 - **Docs** — Document editor for creating and managing team documents
 
-![Agent Config](https://raw.githubusercontent.com/jarredkenny/agency-ai/main/docs/images/agent_ui_agent_config.png)
+### Mission Control
+
+The main dashboard view shows your agent roster on the left, a kanban board of tasks organized by status (Inbox, Assigned, In Progress, Review, Done), and a live activity feed on the right.
+
+![Mission Control](docs/images/agency_ui_mission_control.png)
+
+### Agent Config
+
+Configure each agent's role-specific prompts. Select an agent from the sidebar to view and edit their Soul, User, Agents, Memory, and Tools configuration tabs. Deploy, stop, or delete agents directly from this view.
+
+![Agent Config](docs/images/agent_ui_agent_config.png)
 
 ### Settings
 
@@ -178,26 +193,40 @@ Sensitive values (API keys, SSH keys, credentials) are masked in the API and rev
 
 | | |
 |---|---|
-| ![Identity](https://raw.githubusercontent.com/jarredkenny/agency-ai/main/docs/images/agency_ui_identity_settings.png) | ![AI Provider](https://raw.githubusercontent.com/jarredkenny/agency-ai/main/docs/images/agency_ui_ai_prodivder_settings.png) |
-| ![AWS](https://raw.githubusercontent.com/jarredkenny/agency-ai/main/docs/images/agency_ui_aws_settings.png) | |
+| ![Identity](docs/images/agency_ui_identity_settings.png) | ![AI Provider](docs/images/agency_ui_ai_prodivder_settings.png) |
+| ![AWS](docs/images/agency_ui_aws_settings.png) | |
 
 ### Skills
 
-Sidebar + editor view for managing team skills as markdown documents. Skills are injected into agent prompts to teach them specific capabilities or workflows. Each skill has a name, category, tags, and a markdown body. Create, edit, search, and delete skills directly from the dashboard.
+The skills view has two tabs — **Installed** and **Available**.
 
-### Roles
+**Installed** shows all skills currently in your database. Select a skill to view and edit its markdown body. Create new custom skills with the + button, or search and delete existing ones.
 
-Editor for role configuration documents. Each agent role (e.g. orchestrator, implementer) has a set of config types — Heartbeat, Tools, Agents, Soul, Identity — that control how agents behave. Select a role and config type from the sidebar to edit the markdown content.
+**Available** aggregates skills from known public repositories ([anthropics/skills](https://github.com/anthropics/skills), [obra/superpowers](https://github.com/obra/superpowers), [ComposioHQ/awesome-claude-skills](https://github.com/ComposioHQ/awesome-claude-skills)). Browse descriptions, see which are already installed, and install any skill with one click. The list is cached server-side for 5 minutes.
+
+![Skills — Available tab with installed skills and marketplace](docs/images/agency_ui_skills_marketplace.png)
+
+You can also bulk-import from any GitHub repo that follows the `skills/<name>/SKILL.md` or `<name>/SKILL.md` convention. Click **Import**, enter a repo URL, preview the available skills, select which to import, and confirm.
+
+![Import Skills from GitHub](docs/images/agency_ui_import_skills.jpeg)
+
+Skills are synced to disk and pushed to all active agents whenever they change.
 
 ### Knowledge
 
 Key-value knowledge base editor. Agents and humans store learned facts and context as knowledge entries, each with a unique key, content body, and tags. The sidebar supports search (filters by key and content) and tag display. Create new entries inline, edit content and tags, and save — entries are upserted by key.
+
+![Knowledge](docs/images/agency_ui_knowledge.png)
 
 CLI equivalent:
 ```bash
 agency learn "postgres needs --lock-timeout 5s" --tags postgres,ops
 agency recall "postgres"
 ```
+
+### Roles
+
+Editor for role configuration documents. Each agent role (e.g. orchestrator, implementer) has a set of config types — Heartbeat, Tools, Agents, Soul, Identity — that control how agents behave. Select a role and config type from the sidebar to edit the markdown content.
 
 ### Docs
 

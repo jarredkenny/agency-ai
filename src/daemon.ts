@@ -22,6 +22,34 @@ console.log(`[daemon] API listening on http://${server.hostname}:${server.port}`
 const { runMigrations } = await import("./api/db/migrate.js");
 await runMigrations();
 
+// Initial skill sync + periodic push to agents
+const { syncSkills, pushSkillsToAllAgents } = await import("./api/lib/sync-skills.js");
+const { provisionAuth } = await import("./api/lib/provision-auth.js");
+await syncSkills();
+
+// Re-provision auth for all active agents periodically (picks up credential changes)
+async function provisionAllAgentAuth() {
+  const { db } = await import("./api/db/client.js");
+  const agents = await db.selectFrom("agents").where("status", "=", "active").selectAll().execute();
+  for (const a of agents) {
+    try {
+      await provisionAuth(a.name);
+    } catch {
+      // Non-fatal — agent may still work with existing credentials
+    }
+  }
+}
+
+setInterval(async () => {
+  try {
+    await syncSkills();
+    await pushSkillsToAllAgents();
+    await provisionAllAgentAuth();
+  } catch (err) {
+    console.error("[daemon] sync error:", err);
+  }
+}, 60_000);
+
 function spawnChild(name: string, cmd: string[], cwd: string) {
   let proc: ReturnType<typeof Bun.spawn> | null = null;
   let stopped = false;

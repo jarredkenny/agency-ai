@@ -1,38 +1,9 @@
 import type { Subprocess } from "bun";
-import * as fs from "fs";
-import * as path from "path";
-import * as os from "os";
-import { db } from "../db/client.js";
+import { getSSHConfig } from "./ssh.js";
 
 const tunnels = new Map<string, Subprocess>();
 
 const API_PORT = Number(process.env.PORT ?? 3100);
-
-async function getSSHConfig(): Promise<{ keyPath: string; user: string }> {
-  const rows = await db
-    .selectFrom("settings")
-    .where("category", "=", "ssh")
-    .selectAll()
-    .execute();
-
-  const settings: Record<string, string> = {};
-  for (const r of rows) settings[r.key] = r.value;
-
-  const user = settings["ssh.user"] || "ubuntu";
-  const privateKey = settings["ssh.private_key"] || "";
-
-  if (!privateKey) {
-    throw new Error("SSH private key not configured. Set it in Settings → SSH.");
-  }
-
-  // Write key to a temp file (SSH requires a file path)
-  const keyDir = path.join(os.tmpdir(), "agency-ssh");
-  fs.mkdirSync(keyDir, { recursive: true, mode: 0o700 });
-  const keyPath = path.join(keyDir, "agent_key");
-  fs.writeFileSync(keyPath, privateKey + "\n", { mode: 0o600 });
-
-  return { keyPath, user };
-}
 
 export async function startTunnel(name: string, host: string): Promise<void> {
   // Kill existing tunnel if any

@@ -6,8 +6,11 @@ import {
   removeAgentFromFleet,
 } from "../lib/fleet-sync.js";
 import { startLocal, stopLocal } from "../lib/processes.js";
-import { startTunnel, stopTunnel } from "../lib/tunnels.js";
+import { stopTunnel } from "../lib/tunnels.js";
 import { readFleet } from "../lib/fleet-sync.js";
+import { syncSkills, pushSkillsToAgent } from "../lib/sync-skills.js";
+import { deployEC2, stopEC2 } from "../lib/ec2-deploy.js";
+import { provisionAuth } from "../lib/provision-auth.js";
 
 const NAME_RE = /^[a-z][a-z0-9-]{1,30}$/;
 const VALID_LOCATIONS = new Set(["docker", "ec2", "local"]);
@@ -209,6 +212,15 @@ agents.post("/:name/deploy", async (c) => {
   const agent = await resolveAgent(c.req.param("name"));
   if (!agent) return c.json({ error: "not found" }, 404);
 
+  await syncSkills();
+
+  // Provision OpenClaw auth credentials before starting
+  try {
+    await provisionAuth(agent.name);
+  } catch (err: any) {
+    return c.json({ error: `Auth provisioning failed: ${err.message}` }, 500);
+  }
+
   if (agent.location === "local") {
     startLocal(agent.name, agent.role);
     await db
@@ -220,18 +232,10 @@ agents.post("/:name/deploy", async (c) => {
   }
 
   if (agent.location === "ec2") {
-    const fleet = readFleet();
-    const fleetAgent = fleet.agents[agent.name];
-    const host = fleetAgent?.host;
-    if (!host) {
-      return c.json({ error: "No host configured for EC2 agent. Set 'host' in fleet.json or agent config." }, 400);
-    }
-
-    // Open reverse SSH tunnel so agent can reach our API at localhost:3100
     try {
-      await startTunnel(agent.name, host);
+      await deployEC2(agent.name, agent.role);
     } catch (err: any) {
-      return c.json({ error: `Failed to open SSH tunnel: ${err.message}` }, 500);
+      return c.json({ error: `EC2 deploy failed: ${err.message}` }, 500);
     }
 
     await db
@@ -251,6 +255,13 @@ agents.post("/:name/deploy", async (c) => {
     if (exitCode !== 0) {
       return c.json({ error: "docker compose up failed" }, 500);
     }
+    // Copy auth credentials into running container
+    const authSrc = `${process.env.HOME}/.openclaw-${agent.name}/agents/main/agent/auth-profiles.json`;
+    const cpProc = Bun.spawn(
+      ["docker", "cp", authSrc, `agent-${agent.name}:/root/.openclaw/agents/main/agent/auth-profiles.json`],
+      { cwd: process.cwd(), stdout: "inherit", stderr: "inherit" },
+    );
+    await cpProc.exited; // best-effort, don't fail deploy if cp fails
     await db
       .updateTable("agents")
       .where("id", "=", agent.id)
@@ -298,7 +309,7 @@ agents.post("/:name/stop", async (c) => {
   }
 
   if (agent.location === "ec2") {
-    stopTunnel(agent.name);
+    await stopEC2(agent.name);
     await db
       .updateTable("agents")
       .where("id", "=", agent.id)
