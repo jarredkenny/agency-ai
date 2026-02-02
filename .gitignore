@@ -45,3 +45,4 @@ pnpm-lock.yaml
 agency.db
 agency.db-shm
 agency.db-wal
+.claude/skills/
