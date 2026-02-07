@@ -2,8 +2,29 @@ import * as fs from "fs";
 import * as path from "path";
 import { db } from "../db/client.js";
 
+const HOME = process.env.HOME ?? "";
+
 function resolveFleetPath(): string {
   return process.env.FLEET_PATH ?? path.resolve(process.cwd(), ".agency", "fleet.json");
+}
+
+/**
+ * Read Slack tokens from main OpenClaw config (~/.openclaw/openclaw.json)
+ */
+function getSlackTokensFromOpenClaw(): { botToken?: string; appToken?: string } {
+  const configPath = path.join(HOME, ".openclaw", "openclaw.json");
+  if (!fs.existsSync(configPath)) return {};
+  try {
+    const config = JSON.parse(fs.readFileSync(configPath, "utf-8"));
+    const slack = config.channels?.slack;
+    if (!slack) return {};
+    return {
+      botToken: slack.botToken,
+      appToken: slack.appToken,
+    };
+  } catch {
+    return {};
+  }
 }
 
 let writeLock = false;
@@ -11,9 +32,10 @@ let watcherTimeout: ReturnType<typeof setTimeout> | null = null;
 
 interface FleetAgent {
   role: string;
-  location?: string;
+  runtime?: string;       // "system" | "docker" — replaces location
+  machine?: string;       // machine name from machines.json
+  location?: string;      // DEPRECATED — kept for migration compat
   host?: string;
-  machine?: string;
   skills?: string[];
   slackBotToken?: string;
   slackAppToken?: string;
@@ -66,7 +88,14 @@ export async function reconcileDbFromFleet(): Promise<void> {
   const fleet = readFleet();
   const agents = fleet.agents ?? {};
 
+  // Get Slack tokens from main OpenClaw config as fallback
+  const openclawSlack = getSlackTokensFromOpenClaw();
+
   for (const [name, config] of Object.entries(agents)) {
+    // Use agent-specific tokens if set, otherwise fall back to OpenClaw config
+    const slackBotToken = config.slackBotToken ?? openclawSlack.botToken ?? null;
+    const slackAppToken = config.slackAppToken ?? openclawSlack.appToken ?? null;
+
     const existing = await db
       .selectFrom("agents")
       .select("id")
@@ -80,8 +109,10 @@ export async function reconcileDbFromFleet(): Promise<void> {
         .set({
           role: config.role,
           location: config.location ?? null,
-          slack_bot_token: config.slackBotToken ?? null,
-          slack_app_token: config.slackAppToken ?? null,
+          runtime: config.runtime ?? (config.location === "docker" ? "docker" : "system"),
+          machine: config.machine ?? null,
+          slack_bot_token: slackBotToken,
+          slack_app_token: slackAppToken,
           updated_at: new Date().toISOString(),
         })
         .execute();
@@ -93,36 +124,16 @@ export async function reconcileDbFromFleet(): Promise<void> {
           name,
           role: config.role,
           location: config.location ?? null,
-          slack_bot_token: config.slackBotToken ?? null,
-          slack_app_token: config.slackAppToken ?? null,
+          runtime: config.runtime ?? (config.location === "docker" ? "docker" : "system"),
+          machine: config.machine ?? null,
+          slack_bot_token: slackBotToken,
+          slack_app_token: slackAppToken,
           status: "idle",
           current_task: null,
           session_key: `agent:${name}:main`,
         })
         .execute();
     }
-  }
-
-  // Ensure "human" agent exists for dashboard task creation
-  const humanExists = await db
-    .selectFrom("agents")
-    .select("id")
-    .where("name", "=", "human")
-    .executeTakeFirst();
-
-  if (!humanExists) {
-    await db
-      .insertInto("agents")
-      .values({
-        id: crypto.randomUUID(),
-        name: "human",
-        role: "human",
-        status: "active",
-        current_task: null,
-        session_key: "agent:human:main",
-      })
-      .execute();
-    console.log("[fleet-sync] created human agent");
   }
 
   console.log(`[fleet-sync] reconciled ${Object.keys(agents).length} agent(s)`);
