@@ -3,14 +3,23 @@
 import { useEffect, useState } from "react";
 import { fetchApi } from "@/lib/api";
 
+export interface AgentMetrics {
+  cpuPercent: number;
+  memUsedBytes: number;
+  memTotalBytes: number;
+  updatedAt: string;
+}
+
 export interface Agent {
   id: string;
   name: string;
   role: string;
   status: string;
-  location: string | null;
+  runtime: string | null;
+  machine: string | null;
   slack_bot_token: string | null;
   slack_app_token: string | null;
+  metrics?: AgentMetrics | null;
 }
 
 const roleBadge: Record<string, { label: string; color: string; bg: string }> = {
@@ -21,6 +30,46 @@ const roleBadge: Record<string, { label: string; color: string; bg: string }> = 
 
 function getRoleBadge(role: string) {
   return roleBadge[role] ?? { label: role.slice(0, 3).toUpperCase(), color: "#6b6b6b", bg: "#f0f0f0" };
+}
+
+const runtimeStyle: Record<string, { label: string; color: string; bg: string }> = {
+  system: { label: "SYS", color: "#6b7280", bg: "#f3f4f6" },
+  docker: { label: "DOCKER", color: "#2563eb", bg: "#eff6ff" },
+};
+
+function formatBytes(bytes: number): string {
+  if (bytes >= 1024 ** 3) return (bytes / 1024 ** 3).toFixed(1) + " GB";
+  if (bytes >= 1024 ** 2) return (bytes / 1024 ** 2).toFixed(0) + " MB";
+  return (bytes / 1024).toFixed(0) + " KB";
+}
+
+function usageColor(percent: number): string {
+  if (percent >= 80) return "#ef4444";
+  if (percent >= 50) return "#eab308";
+  return "#22c55e";
+}
+
+function MetricBar({ label, percent, detail }: { label: string; percent: number; detail: string }) {
+  const color = usageColor(percent);
+  return (
+    <div className="flex items-center gap-1.5">
+      <span className="text-[9px] w-6 shrink-0" style={{ color: "var(--text-muted)" }}>
+        {label}
+      </span>
+      <div
+        className="flex-1 h-1.5 rounded-full overflow-hidden"
+        style={{ background: "var(--border)" }}
+      >
+        <div
+          className="h-full rounded-full transition-all duration-500"
+          style={{ width: `${Math.max(2, percent)}%`, background: color }}
+        />
+      </div>
+      <span className="text-[9px] w-12 text-right shrink-0" style={{ color: "var(--text-muted)" }}>
+        {detail}
+      </span>
+    </div>
+  );
 }
 
 export function AgentSidebar({ agents }: { agents: Agent[] }) {
@@ -41,15 +90,9 @@ export function AgentSidebar({ agents }: { agents: Agent[] }) {
           return (
             <div
               key={a.id}
-              className="flex items-center gap-2.5 px-2 py-2 rounded-md hover:bg-black/[0.03] cursor-default"
+              className="px-2 py-2 rounded-md hover:bg-black/[0.03] cursor-default"
             >
-              <div
-                className="w-8 h-8 rounded-full flex items-center justify-center text-white text-xs font-bold shrink-0"
-                style={{ background: badge.color }}
-              >
-                {a.name.charAt(0).toUpperCase()}
-              </div>
-              <div className="min-w-0 flex-1">
+              <div className="min-w-0">
                 <div className="flex items-center gap-1.5">
                   <span
                     className={`w-2 h-2 rounded-full shrink-0 ${
@@ -62,17 +105,51 @@ export function AgentSidebar({ agents }: { agents: Agent[] }) {
                   />
                   <span className="text-sm font-semibold truncate">{a.name}</span>
                 </div>
-                <div className="flex items-center gap-1.5 mt-0.5">
+                <div className="flex items-center gap-1 mt-0.5 flex-wrap">
                   <span
                     className="text-[10px] font-bold px-1.5 py-0.5 rounded"
                     style={{ color: badge.color, background: badge.bg }}
                   >
                     {badge.label}
                   </span>
-                  <span className="text-xs truncate" style={{ color: "var(--text-muted)" }}>
-                    {a.role}
-                  </span>
+                  {a.runtime && runtimeStyle[a.runtime] && (
+                    <span
+                      className="text-[9px] font-bold px-1 py-0.5 rounded"
+                      style={{
+                        color: runtimeStyle[a.runtime].color,
+                        background: runtimeStyle[a.runtime].bg,
+                      }}
+                    >
+                      {runtimeStyle[a.runtime].label}
+                    </span>
+                  )}
+                  {a.machine && (
+                    <span
+                      className="text-[9px] font-bold px-1 py-0.5 rounded"
+                      style={{ color: "#7c3aed", background: "#f5f3ff" }}
+                    >
+                      {a.machine}
+                    </span>
+                  )}
                 </div>
+                {a.metrics && (
+                  <div className="mt-1 space-y-0.5">
+                    <MetricBar
+                      label="CPU"
+                      percent={a.metrics.cpuPercent}
+                      detail={`${a.metrics.cpuPercent}%`}
+                    />
+                    <MetricBar
+                      label="MEM"
+                      percent={
+                        a.metrics.memTotalBytes > 0
+                          ? Math.round((a.metrics.memUsedBytes / a.metrics.memTotalBytes) * 100)
+                          : 0
+                      }
+                      detail={`${formatBytes(a.metrics.memUsedBytes)}/${formatBytes(a.metrics.memTotalBytes)}`}
+                    />
+                  </div>
+                )}
               </div>
             </div>
           );
