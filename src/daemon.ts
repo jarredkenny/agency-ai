@@ -24,9 +24,61 @@ await runMigrations();
 const { seedDefaults } = await import("./api/db/seed.js");
 await seedDefaults();
 
+// Migrate fleet.json: location → runtime + machine
+{
+  const { readFleet } = await import("./api/lib/fleet-sync.js");
+  const { readMachines } = await import("./api/routes/machines.js");
+  const fleet = readFleet();
+  const machines = readMachines();
+  const localMachine = machines.find((m) => m.auth === "local");
+  let fleetDirty = false;
+
+  for (const [name, fa] of Object.entries(fleet.agents)) {
+    if ((fa as any).location && !fa.runtime) {
+      const loc = (fa as any).location as string;
+      if (loc === "docker") {
+        fa.runtime = "docker";
+        fa.machine = localMachine?.name;
+      } else if (loc === "remote") {
+        fa.runtime = "system";
+        // machine should already be set from old remote config
+      } else {
+        fa.runtime = "system";
+        fa.machine = localMachine?.name;
+      }
+      delete (fa as any).location;
+      fleetDirty = true;
+    }
+  }
+
+  if (fleetDirty) {
+    const fs = await import("fs");
+    const fleetPath = process.env.FLEET_PATH ?? ".agency/fleet.json";
+    fs.writeFileSync(fleetPath, JSON.stringify(fleet, null, 2) + "\n");
+    console.log("[daemon] migrated fleet.json from location → runtime + machine");
+  }
+
+  // Also backfill machine column in DB if null
+  if (localMachine) {
+    const { db } = await import("./api/db/client.js");
+    await db.updateTable("agents")
+      .set({ machine: localMachine.name })
+      .where("machine", "is", null)
+      .execute();
+  }
+}
+
 // Push skills to remote agents periodically
-const { pushSkillsToAllAgents } = await import("./api/lib/sync-skills.js");
+const { pushSkillsToAllAgents, syncSystemFilesToRoles } = await import("./api/lib/sync-skills.js");
 const { provisionAgent, pushToRemote, pushToDocker } = await import("./api/lib/provision-openclaw.js");
+const { collectAllMetrics } = await import("./api/lib/metrics.js");
+
+// Reconcile running agent processes (handles daemon restarts)
+const { reconcileRunningProcesses } = await import("./api/lib/processes.js");
+await reconcileRunningProcesses();
+
+// Sync system files to all roles on startup
+syncSystemFilesToRoles();
 
 // Full config + auth + skills sync for all active agents
 async function syncAllAgents() {
@@ -62,12 +114,25 @@ async function syncAllAgents() {
 
 setInterval(async () => {
   try {
+    syncSystemFilesToRoles();
     await pushSkillsToAllAgents();
     await syncAllAgents();
   } catch (err) {
     console.error("[daemon] sync error:", err);
   }
 }, 60_000);
+
+// Collect system metrics every 15 seconds
+setInterval(async () => {
+  try {
+    await collectAllMetrics();
+  } catch (err) {
+    console.error("[daemon] metrics collection error:", err);
+  }
+}, 15_000);
+
+// Collect once on startup (after a short delay to let agents register)
+setTimeout(() => collectAllMetrics().catch(console.error), 3_000);
 
 function spawnChild(name: string, cmd: string[], cwd: string) {
   let proc: ReturnType<typeof Bun.spawn> | null = null;
