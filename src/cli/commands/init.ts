@@ -20,6 +20,9 @@ export default async function init(_args: string[]) {
   const teamName = await ask("? Team name", "My Team");
   const orchestratorName = await ask("? Orchestrator agent name", "sonny");
 
+  const os = await import("os");
+  const machineName = await ask("? Machine name for this host", os.hostname());
+
   const doSlack = await confirm("? Configure Slack?", false);
   let slackBotToken = "";
   let slackAppToken = "";
@@ -47,16 +50,23 @@ export default async function init(_args: string[]) {
   // Create fleet.json
   const fleet: any = {
     agents: {
-      [orchestratorName]: { role: "orchestrator", location: "local" },
+      [orchestratorName]: { role: "orchestrator", runtime: "system", machine: machineName },
     },
   };
   for (const worker of workerRoles) {
-    fleet.agents[worker] = { role: "implementer", location: "local" };
+    fleet.agents[worker] = { role: "implementer", runtime: "system", machine: machineName };
   }
   fs.writeFileSync(
     path.join(agencyDir, "fleet.json"),
     JSON.stringify(fleet, null, 2) + "\n"
   );
+
+  // Create machines.json with the local machine
+  const machinesPath = path.join(agencyDir, "machines.json");
+  fs.writeFileSync(machinesPath, JSON.stringify([
+    { name: machineName, host: "localhost", user: "", port: 0, auth: "local" },
+  ], null, 2) + "\n");
+  console.log(`  Registered machine: ${machineName} (local)`);
 
   // Run migrations
   console.log("  Running migrations ...");
