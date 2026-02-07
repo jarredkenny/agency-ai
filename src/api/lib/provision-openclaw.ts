@@ -3,13 +3,14 @@ import * as path from "path";
 import { db } from "../db/client.js";
 
 const HOME = process.env.HOME ?? "";
+const ROLES_DIR = path.join(process.cwd(), "roles");
 
 /**
  * Deterministic gateway port from agent name.
- * Local agents each need a unique port; EC2/Docker always use 18789 (isolated).
+ * System agents each need a unique port; Docker always uses 18789 (isolated).
  */
-export function gatewayPort(name: string, location: string): number {
-  if (location !== "local") return 18789;
+export function gatewayPort(name: string, runtime: string): number {
+  if (runtime !== "system") return 18789;
   let hash = 0;
   for (const c of name) hash = ((hash << 5) - hash + c.charCodeAt(0)) | 0;
   return 19000 + (Math.abs(hash) % 1000);
@@ -21,7 +22,9 @@ export function gatewayPort(name: string, location: string): number {
 export async function buildOpenClawJson(
   agentName: string,
   role: string,
-  location: string,
+  runtime: string,
+  workspace?: string,
+  slackTokens?: { botToken?: string; appToken?: string },
 ): Promise<Record<string, unknown>> {
   const rows = await db
     .selectFrom("settings")
@@ -32,12 +35,13 @@ export async function buildOpenClawJson(
   const s: Record<string, string> = {};
   for (const r of rows) s[r.key] = r.value;
 
-  const workspace = path.resolve(process.cwd(), `roles/${role}`);
-  const port = gatewayPort(agentName, location);
+  // Use provided workspace or fall back to role directory
+  const workspacePath = workspace ?? path.resolve(process.cwd(), `roles/${role}`);
+  const port = gatewayPort(agentName, runtime);
 
   // Agent defaults
   const defaults: Record<string, unknown> = {
-    workspace,
+    workspace: workspacePath,
   };
 
   // Model
@@ -53,7 +57,6 @@ export async function buildOpenClawJson(
   defaults.timeoutSeconds = Number(s["agent.timeout_seconds"] || "600");
   defaults.maxConcurrent = Number(s["agent.max_concurrent"] || "1");
   defaults.compaction = { mode: s["agent.compaction"] || "default" };
-  defaults.contextPruning = { mode: s["agent.context_pruning"] || "adaptive" };
   defaults.sandbox = {
     mode: s["agent.sandbox_mode"] || "non-main",
     scope: s["agent.sandbox_scope"] || "agent",
@@ -74,15 +77,52 @@ export async function buildOpenClawJson(
     tools.deny = s["agent.tools_deny"].split(",").map((t) => t.trim()).filter(Boolean);
   }
 
+  // Copy channels config from main openclaw profile (for Slack, etc.)
+  const mainConfigPath = path.join(HOME, ".openclaw", "openclaw.json");
+  let channels: Record<string, unknown> | undefined;
+  if (fs.existsSync(mainConfigPath)) {
+    try {
+      const mainConfig = JSON.parse(fs.readFileSync(mainConfigPath, "utf-8"));
+      if (mainConfig.channels) {
+        channels = mainConfig.channels;
+      }
+    } catch {
+      // ignore parse errors
+    }
+  }
+
+  // Override Slack tokens with agent-specific ones if provided
+  if (slackTokens?.botToken || slackTokens?.appToken) {
+    if (!channels) channels = {};
+    const slack = (channels.slack ?? {}) as Record<string, unknown>;
+    if (slackTokens.botToken) slack.botToken = slackTokens.botToken;
+    if (slackTokens.appToken) slack.appToken = slackTokens.appToken;
+    if (!slack.mode) slack.mode = "socket";
+    if (!slack.enabled) slack.enabled = true;
+    if (slack.dm === undefined) slack.dm = { enabled: true, policy: "allowlist" };
+    channels.slack = slack;
+  }
+
+  // Ensure agency CLI is in PATH for non-sandboxed agents
+  const envPath = runtime === "docker"
+    ? "/root/.bun/bin:/usr/local/bin:/usr/bin:/bin"
+    : `${HOME}/.bun/bin:/usr/local/bin:/usr/bin:/bin`;
+
+  // Skills config - bundled skills always available, custom skills filtered via workspace
+  const skillsConfig: Record<string, unknown> = {
+    load: { watch: true },
+  };
+
   const config: Record<string, unknown> = {
     agents: {
       defaults,
       list: [
         { id: "main" },
-        { id: agentName, name: agentName, workspace },
+        { id: agentName, name: agentName, workspace: workspacePath },
       ],
     },
     tools,
+    skills: skillsConfig,
     browser: { enabled: s["agent.browser_enabled"] !== "false" },
     logging: {
       level: s["agent.logging_level"] || "info",
@@ -92,8 +132,20 @@ export async function buildOpenClawJson(
       mode: "local",
       port,
       bind: "loopback",
+      auth: {
+        mode: "token",
+        token: crypto.randomUUID(),
+      },
     },
     commands: { native: "auto", restart: true },
+    env: {
+      PATH: envPath,
+      AGENCY_AGENT_NAME: agentName,
+      AGENCY_API_URL: runtime === "docker"
+        ? `http://host.docker.internal:${Number(process.env.PORT ?? 3100)}`
+        : `http://localhost:${Number(process.env.PORT ?? 3100)}`,
+    },
+    ...(channels ? { channels } : {}),
   };
 
   return config;
@@ -159,21 +211,65 @@ export async function buildAuthProfiles(): Promise<Record<string, unknown>> {
 }
 
 /**
+ * Create a per-agent workspace with all role files and skills.
+ * Uses symlinks to avoid duplicating role files.
+ */
+function buildAgentWorkspace(agentName: string, role: string): string {
+  const profileDir = path.join(HOME, `.openclaw-${agentName}`);
+  const workspaceDir = path.join(profileDir, "workspace");
+  const roleDir = path.join(ROLES_DIR, role);
+
+  // Clear and recreate workspace
+  if (fs.existsSync(workspaceDir)) {
+    fs.rmSync(workspaceDir, { recursive: true, force: true });
+  }
+  fs.mkdirSync(workspaceDir, { recursive: true });
+
+  // Symlink all role files and directories
+  if (fs.existsSync(roleDir)) {
+    for (const entry of fs.readdirSync(roleDir)) {
+      const src = path.join(roleDir, entry);
+      const dest = path.join(workspaceDir, entry);
+      try {
+        fs.symlinkSync(src, dest);
+      } catch {
+        // Fall back to copy if symlink fails
+        if (fs.statSync(src).isDirectory()) {
+          fs.cpSync(src, dest, { recursive: true });
+        } else {
+          fs.copyFileSync(src, dest);
+        }
+      }
+    }
+  }
+
+  // Write IDENTITY.md so the agent knows its own name
+  const identity = `# Identity\n\nYour name is **${agentName}**. You are the "${agentName}" agent with the "${role}" role.\n\nWhen asked who you are, use your name — not "Claude" or any other default.\n`;
+  fs.writeFileSync(path.join(workspaceDir, "IDENTITY.md"), identity);
+
+  return workspaceDir;
+}
+
+/**
  * Provision an agent: write openclaw.json + auth-profiles.json to ~/.openclaw-<name>/.
  * Returns the paths written.
  */
 export async function provisionAgent(
   agentName: string,
   role: string,
-  location: string = "local",
+  runtime: string = "system",
+  slackTokens?: { botToken?: string; appToken?: string },
 ): Promise<{ configPath: string; authPath: string }> {
   const profileDir = path.join(HOME, `.openclaw-${agentName}`);
   const configPath = path.join(profileDir, "openclaw.json");
   const authDir = path.join(profileDir, "agents", "main", "agent");
   const authPath = path.join(authDir, "auth-profiles.json");
 
+  // Build per-agent workspace
+  const workspace = buildAgentWorkspace(agentName, role);
+
   const [config, auth] = await Promise.all([
-    buildOpenClawJson(agentName, role, location),
+    buildOpenClawJson(agentName, role, runtime, workspace, slackTokens),
     buildAuthProfiles(),
   ]);
 
@@ -188,7 +284,7 @@ export async function provisionAgent(
 }
 
 /**
- * Push the full openclaw profile + role workspace to a remote EC2 host via rsync.
+ * Push the full openclaw profile + role workspace to a remote host via rsync.
  */
 export async function pushToRemote(
   agentName: string,
@@ -197,20 +293,19 @@ export async function pushToRemote(
   machineName?: string,
 ): Promise<void> {
   const { getSSHConfig } = await import("./ssh.js");
-  const { keyPath, user, port } = await getSSHConfig(machineName);
-  const sshOpt = `ssh -i ${keyPath} -p ${port} -o StrictHostKeyChecking=no`;
+  const config = await getSSHConfig(machineName);
 
   const profileDir = path.join(HOME, `.openclaw-${agentName}/`);
   const rolesDir = path.join(process.cwd(), `roles/${role}/`);
 
   // Rsync openclaw profile dir
   const configProc = Bun.spawn(
-    ["rsync", "-az", "-e", sshOpt, profileDir, `${user}@${host}:~/.openclaw-${agentName}/`],
+    ["rsync", "-az", "-e", config.sshCmd, profileDir, `${config.dest}:~/.openclaw-${agentName}/`],
     { stdout: "inherit", stderr: "inherit" },
   );
   // Rsync role workspace
   const rolesProc = Bun.spawn(
-    ["rsync", "-az", "--delete", "-e", sshOpt, rolesDir, `${user}@${host}:~/agency/roles/${role}/`],
+    ["rsync", "-az", "--delete", "-e", config.sshCmd, rolesDir, `${config.dest}:~/agency/roles/${role}/`],
     { stdout: "inherit", stderr: "inherit" },
   );
 
@@ -227,21 +322,55 @@ export async function pushToRemote(
 export async function pushToDocker(agentName: string, role: string): Promise<void> {
   const profileDir = path.join(HOME, `.openclaw-${agentName}`);
   const container = `agent-${agentName}`;
+  const containerProfileDir = `/root/.openclaw-${agentName}`;
 
-  // Copy openclaw.json
+  // Rewrite workspace paths in config for container context
+  const configSrc = path.join(profileDir, "openclaw.json");
+  const configRaw = fs.readFileSync(configSrc, "utf-8");
+  const containerConfig = configRaw.replaceAll(profileDir, containerProfileDir);
+  const tmpConfig = path.join(profileDir, "openclaw.docker.json");
+  fs.writeFileSync(tmpConfig, containerConfig);
+
+  // Create directory structure inside container (clear workspace to remove stale symlinks)
+  const mkdirProc = Bun.spawn(
+    ["docker", "exec", container, "sh", "-c",
+      `rm -rf ${containerProfileDir}/workspace && mkdir -p ${containerProfileDir}/agents/main/agent ${containerProfileDir}/workspace`],
+    { stdout: "inherit", stderr: "inherit" },
+  );
+  await mkdirProc.exited;
+
+  // Copy rewritten openclaw.json
   const configProc = Bun.spawn(
-    ["docker", "cp", path.join(profileDir, "openclaw.json"), `${container}:/root/.openclaw-${agentName}/openclaw.json`],
+    ["docker", "cp", tmpConfig, `${container}:${containerProfileDir}/openclaw.json`],
     { stdout: "inherit", stderr: "inherit" },
   );
 
   // Copy auth-profiles.json
   const authProc = Bun.spawn(
     ["docker", "cp", path.join(profileDir, "agents/main/agent/auth-profiles.json"),
-      `${container}:/root/.openclaw-${agentName}/agents/main/agent/auth-profiles.json`],
+      `${container}:${containerProfileDir}/agents/main/agent/auth-profiles.json`],
     { stdout: "inherit", stderr: "inherit" },
   );
 
-  const [configCode, authCode] = await Promise.all([configProc.exited, authProc.exited]);
+  // Copy workspace files (role files) — use tar with --dereference to resolve
+  // symlinks, since docker cp preserves them and the host paths don't exist in the container
+  const workspaceDir = path.join(profileDir, "workspace");
+  const tar = Bun.spawn(
+    ["tar", "-ch", "--dereference", "-C", workspaceDir, "."],
+    { stdout: "pipe", stderr: "inherit" },
+  );
+  const untar = Bun.spawn(
+    ["docker", "cp", "-", `${container}:${containerProfileDir}/workspace`],
+    { stdin: tar.stdout, stdout: "inherit", stderr: "inherit" },
+  );
+
+  const [configCode, authCode, workspaceCode] = await Promise.all([
+    configProc.exited, authProc.exited, untar.exited,
+  ]);
   if (configCode !== 0) console.error(`[provision] docker cp config to ${container} failed`);
   if (authCode !== 0) console.error(`[provision] docker cp auth to ${container} failed`);
+  if (workspaceCode !== 0) console.error(`[provision] docker cp workspace to ${container} failed`);
+
+  // Clean up temp file
+  try { fs.unlinkSync(tmpConfig); } catch {}
 }
