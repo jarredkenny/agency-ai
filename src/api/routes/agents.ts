@@ -12,7 +12,7 @@ import { listRoles, getRoleConfig } from "../lib/fs-store.js";
 import { getMetrics } from "../lib/metrics.js";
 
 const NAME_RE = /^[a-z][a-z0-9-]{1,30}$/;
-const VALID_LOCATIONS = new Set(["docker", "remote", "local"]);
+const VALID_RUNTIMES = new Set(["system", "docker"]);
 
 // Map of allowed file names to config_type values
 const FILE_TO_CONFIG_TYPE: Record<string, string> = {
@@ -173,8 +173,8 @@ agents.post("/", async (c) => {
   const body = await c.req.json<{
     name: string;
     role: string;
-    location: string;
-    machine?: string;
+    runtime: string;      // "system" | "docker"
+    machine: string;      // required machine name
     slack_bot_token?: string;
     slack_app_token?: string;
   }>();
@@ -182,8 +182,16 @@ agents.post("/", async (c) => {
   if (!NAME_RE.test(body.name)) {
     return c.json({ error: "invalid name: must match /^[a-z][a-z0-9-]{1,30}$/" }, 400);
   }
-  if (!VALID_LOCATIONS.has(body.location)) {
-    return c.json({ error: "invalid location: must be docker, remote, or local" }, 400);
+  if (!VALID_RUNTIMES.has(body.runtime)) {
+    return c.json({ error: "invalid runtime: must be system or docker" }, 400);
+  }
+  if (!body.machine) {
+    return c.json({ error: "machine is required" }, 400);
+  }
+  // Validate machine exists
+  const { readMachines } = await import("../routes/machines.js");
+  if (!readMachines().find((m: any) => m.name === body.machine)) {
+    return c.json({ error: `machine "${body.machine}" not found` }, 400);
   }
 
   const existing = await db
@@ -198,8 +206,8 @@ agents.post("/", async (c) => {
   // Write to fleet.json
   await writeAgentToFleet(body.name, {
     role: body.role,
-    location: body.location,
-    ...(body.machine ? { machine: body.machine } : {}),
+    runtime: body.runtime,
+    machine: body.machine,
     ...(body.slack_bot_token ? { slackBotToken: body.slack_bot_token } : {}),
     ...(body.slack_app_token ? { slackAppToken: body.slack_app_token } : {}),
   });
@@ -211,7 +219,8 @@ agents.post("/", async (c) => {
       id: crypto.randomUUID(),
       name: body.name,
       role: body.role,
-      location: body.location,
+      runtime: body.runtime,
+      machine: body.machine,
       slack_bot_token: body.slack_bot_token ?? null,
       slack_app_token: body.slack_app_token ?? null,
       status: "idle",
@@ -233,7 +242,7 @@ agents.patch("/:name", async (c) => {
     status?: string;
     current_task?: string | null;
     role?: string;
-    location?: string;
+    runtime?: string;
     machine?: string | null;
     slack_bot_token?: string | null;
     slack_app_token?: string | null;
@@ -243,11 +252,14 @@ agents.patch("/:name", async (c) => {
   if (body.status !== undefined) q = q.set("status", body.status);
   if (body.current_task !== undefined) q = q.set("current_task", body.current_task);
   if (body.role !== undefined) q = q.set("role", body.role);
-  if (body.location !== undefined) {
-    if (!VALID_LOCATIONS.has(body.location)) {
-      return c.json({ error: "invalid location" }, 400);
+  if (body.runtime !== undefined) {
+    if (!VALID_RUNTIMES.has(body.runtime)) {
+      return c.json({ error: "invalid runtime" }, 400);
     }
-    q = q.set("location", body.location);
+    q = q.set("runtime", body.runtime);
+  }
+  if (body.machine !== undefined) {
+    q = q.set("machine", body.machine);
   }
   if (body.slack_bot_token !== undefined) q = q.set("slack_bot_token", body.slack_bot_token);
   if (body.slack_app_token !== undefined) q = q.set("slack_app_token", body.slack_app_token);
@@ -256,17 +268,17 @@ agents.patch("/:name", async (c) => {
   const updated = await q.returningAll().executeTakeFirstOrThrow();
 
   // Sync config fields to fleet.json
-  if (body.role !== undefined || body.location !== undefined ||
+  if (body.role !== undefined || body.runtime !== undefined ||
       body.machine !== undefined ||
       body.slack_bot_token !== undefined ||
       body.slack_app_token !== undefined) {
     const fleet = readFleet();
-    const existing = fleet.agents[agent.name] ?? { role: updated.role, location: updated.location ?? "local" };
+    const existing = fleet.agents[agent.name] ?? { role: updated.role, runtime: updated.runtime ?? "system" };
     await writeAgentToFleet(agent.name, {
       ...existing,
       role: updated.role,
-      location: updated.location ?? "local",
-      ...(body.machine !== undefined ? { machine: body.machine ?? undefined } : {}),
+      runtime: updated.runtime ?? "system",
+      machine: body.machine !== undefined ? (body.machine ?? undefined) : (existing.machine ?? undefined),
       ...(updated.slack_bot_token ? { slackBotToken: updated.slack_bot_token } : {}),
       ...(updated.slack_app_token ? { slackAppToken: updated.slack_app_token } : {}),
     });
