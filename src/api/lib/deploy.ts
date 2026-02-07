@@ -70,9 +70,7 @@ export async function deploy(
           appToken: agent.slack_app_token ?? undefined,
         }
       : undefined;
-  const location =
-    runtime === "docker" ? "docker" : isLocal ? "local" : "remote";
-  await provisionAgent(agent.name, agent.role, location, slackTokens);
+  await provisionAgent(agent.name, agent.role, runtime, slackTokens);
 
   if (runtime === "docker") {
     await deployDocker(agent, machine, isLocal);

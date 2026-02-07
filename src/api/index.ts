@@ -65,10 +65,13 @@ if (dashboardDir) {
   app.use("*", serveStatic({ root: dashboardDir, rewriteRequestPath: () => "/index.html" }));
 }
 
-// Reconcile fleet.json → DB on startup, then watch for changes
-reconcileDbFromFleet()
-  .then(() => startWatcher())
-  .catch((err) => console.error("[startup] fleet sync failed:", err));
+/**
+ * Initialize fleet sync — call AFTER migrations have run.
+ */
+export async function initFleetSync() {
+  await reconcileDbFromFleet();
+  startWatcher();
+}
 
 export default {
   port: Number(process.env.PORT ?? 3100),

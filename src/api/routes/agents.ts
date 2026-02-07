@@ -114,28 +114,20 @@ agents.get("/roles", async (c) => {
 
 agents.get("/", async (c) => {
   const rows = await db.selectFrom("agents").selectAll().execute();
-  const fleet = readFleet();
 
-  const enriched = rows.map((r) => {
-    const fa = fleet.agents[r.name];
-    return {
-      ...r,
-      machine: fa?.machine ?? null,
-      metrics: getMetrics(r.name),
-    };
-  });
+  const enriched = rows.map((r) => ({
+    ...r,
+    metrics: getMetrics(r.name),
+  }));
   return c.json(enriched);
 });
 
 agents.get("/:name", async (c) => {
   const agent = await resolveAgent(c.req.param("name"));
   if (!agent) return c.json({ error: "not found" }, 404);
-  const fleet = readFleet();
-  const fa = fleet.agents[agent.name];
 
   return c.json({
     ...agent,
-    machine: fa?.machine ?? null,
     metrics: getMetrics(agent.name),
   });
 });

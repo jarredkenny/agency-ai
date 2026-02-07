@@ -24,7 +24,7 @@ await runMigrations();
 const { seedDefaults } = await import("./api/db/seed.js");
 await seedDefaults();
 
-// Migrate fleet.json: location → runtime + machine
+// Migrate fleet.json: location → runtime + machine (before fleet sync)
 {
   const { readFleet } = await import("./api/lib/fleet-sync.js");
   const { readMachines } = await import("./api/routes/machines.js");
@@ -68,6 +68,9 @@ await seedDefaults();
   }
 }
 
+// Fleet sync (must happen after migrations so runtime+machine columns exist)
+await apiModule.initFleetSync();
+
 // Push skills to remote agents periodically
 const { pushSkillsToAllAgents, syncSystemFilesToRoles } = await import("./api/lib/sync-skills.js");
 const { provisionAgent, pushToRemote, pushToDocker } = await import("./api/lib/provision-openclaw.js");
@@ -88,27 +91,31 @@ async function syncAllAgents() {
   const fleet = readFleet();
 
   for (const a of agents) {
-    const location = a.location ?? "local";
+    const runtime = (a as any).runtime ?? "system";
+    const machineName = (a as any).machine;
     try {
-      await provisionAgent(a.name, a.role, location);
+      await provisionAgent(a.name, a.role, runtime);
     } catch {
       // Non-fatal — agent may still work with existing config
     }
 
+    // Determine if machine is local
+    const { readMachines } = await import("./api/routes/machines.js");
+    const machines = readMachines();
+    const machine = machines.find((m: any) => m.name === machineName);
+    const isLocal = !machine || machine.auth === "local";
+
     // Push to remote/docker agents
-    if (location === "remote") {
-      const machine = fleet.agents[a.name]?.machine;
-      if (machine) {
-        try {
-          const { getSSHConfig } = await import("./api/lib/ssh.js");
-          const { host } = await getSSHConfig(machine);
-          await pushToRemote(a.name, a.role, host, machine);
-        } catch {}
-      }
-    } else if (location === "docker") {
+    if (runtime === "system" && !isLocal && machineName) {
+      try {
+        const { getSSHConfig } = await import("./api/lib/ssh.js");
+        const { host } = await getSSHConfig(machineName);
+        await pushToRemote(a.name, a.role, host, machineName);
+      } catch {}
+    } else if (runtime === "docker") {
       try { await pushToDocker(a.name, a.role); } catch {}
     }
-    // Local agents: openclaw watches the filesystem, no push needed
+    // Local system agents: openclaw watches the filesystem, no push needed
   }
 }
 

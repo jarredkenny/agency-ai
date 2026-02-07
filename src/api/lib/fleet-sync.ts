@@ -103,18 +103,22 @@ export async function reconcileDbFromFleet(): Promise<void> {
       .executeTakeFirst();
 
     if (existing) {
+      const updates: Record<string, any> = {
+        role: config.role,
+        location: config.location ?? null,
+        runtime: config.runtime ?? (config.location === "docker" ? "docker" : "system"),
+        slack_bot_token: slackBotToken,
+        slack_app_token: slackAppToken,
+        updated_at: new Date().toISOString(),
+      };
+      // Only overwrite machine if fleet.json explicitly sets it
+      if (config.machine !== undefined) {
+        updates.machine = config.machine;
+      }
       await db
         .updateTable("agents")
         .where("id", "=", existing.id)
-        .set({
-          role: config.role,
-          location: config.location ?? null,
-          runtime: config.runtime ?? (config.location === "docker" ? "docker" : "system"),
-          machine: config.machine ?? null,
-          slack_bot_token: slackBotToken,
-          slack_app_token: slackAppToken,
-          updated_at: new Date().toISOString(),
-        })
+        .set(updates)
         .execute();
     } else {
       await db

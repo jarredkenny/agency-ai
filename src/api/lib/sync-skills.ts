@@ -1,34 +1,34 @@
 import { join } from "path";
-import { existsSync } from "fs";
+import { existsSync, readdirSync, copyFileSync, mkdirSync } from "fs";
 import { db } from "../db/client.js";
 import { getSSHConfig } from "./ssh.js";
-import { readFleet } from "./fleet-sync.js";
+import { readMachines } from "../routes/machines.js";
+import { listRoles } from "./fs-store.js";
 
 export async function pushSkillsToAgent(agent: {
   name: string;
   role: string;
-  location: string;
+  runtime: string;
+  machine?: string | null;
 }): Promise<void> {
-  if (agent.location === "local") return;
+  const isLocal = resolveIsLocal(agent.machine);
+  if (isLocal && agent.runtime === "system") return;
 
   const skillsSource = join(process.cwd(), `roles/${agent.role}/skills/`);
   if (!existsSync(skillsSource)) return;
 
-  if (agent.location === "remote") {
-    const fleet = readFleet();
-    const machine = fleet.agents[agent.name]?.machine;
-    if (!machine) return;
-
-    const { keyPath, user, host, port } = await getSSHConfig(machine);
+  if (agent.runtime === "system" && !isLocal) {
+    if (!agent.machine) return;
+    const config = await getSSHConfig(agent.machine);
     const proc = Bun.spawn(
       [
         "rsync",
         "-az",
         "--delete",
         "-e",
-        `ssh -i ${keyPath} -p ${port} -o StrictHostKeyChecking=no`,
+        config.sshCmd,
         skillsSource,
-        `${user}@${host}:~/agency/roles/${agent.role}/skills/`,
+        `${config.dest}:~/agency/roles/${agent.role}/skills/`,
       ],
       { stdout: "inherit", stderr: "inherit" },
     );
@@ -38,7 +38,7 @@ export async function pushSkillsToAgent(agent: {
     }
   }
 
-  if (agent.location === "docker") {
+  if (agent.runtime === "docker") {
     const proc = Bun.spawn(
       [
         "docker",
@@ -58,28 +58,27 @@ export async function pushSkillsToAgent(agent: {
 export async function pushRoleToAgent(agent: {
   name: string;
   role: string;
-  location: string;
+  runtime: string;
+  machine?: string | null;
 }): Promise<void> {
-  if (agent.location === "local") return;
+  const isLocal = resolveIsLocal(agent.machine);
+  if (isLocal && agent.runtime === "system") return;
 
   const roleSource = join(process.cwd(), `roles/${agent.role}/`);
   if (!existsSync(roleSource)) return;
 
-  if (agent.location === "remote") {
-    const fleet = readFleet();
-    const machine = fleet.agents[agent.name]?.machine;
-    if (!machine) return;
-
-    const { keyPath, user, host, port } = await getSSHConfig(machine);
+  if (agent.runtime === "system" && !isLocal) {
+    if (!agent.machine) return;
+    const config = await getSSHConfig(agent.machine);
     const proc = Bun.spawn(
       [
         "rsync",
         "-az",
         "--delete",
         "-e",
-        `ssh -i ${keyPath} -p ${port} -o StrictHostKeyChecking=no`,
+        config.sshCmd,
         roleSource,
-        `${user}@${host}:~/agency/roles/${agent.role}/`,
+        `${config.dest}:~/agency/roles/${agent.role}/`,
       ],
       { stdout: "inherit", stderr: "inherit" },
     );
@@ -89,7 +88,7 @@ export async function pushRoleToAgent(agent: {
     }
   }
 
-  if (agent.location === "docker") {
+  if (agent.runtime === "docker") {
     const proc = Bun.spawn(
       [
         "docker",
@@ -116,7 +115,7 @@ export async function pushRoleToAllAgents(role: string): Promise<void> {
 
   await Promise.allSettled(
     agents.map((a) =>
-      pushRoleToAgent({ name: a.name, role: a.role, location: a.location ?? "local" }),
+      pushRoleToAgent({ name: a.name, role: a.role, runtime: (a as any).runtime ?? "system", machine: (a as any).machine }),
     ),
   );
 }
@@ -130,7 +129,43 @@ export async function pushSkillsToAllAgents(): Promise<void> {
 
   await Promise.allSettled(
     agents.map((a) =>
-      pushSkillsToAgent({ name: a.name, role: a.role, location: a.location ?? "local" }),
+      pushSkillsToAgent({ name: a.name, role: a.role, runtime: (a as any).runtime ?? "system", machine: (a as any).machine }),
     ),
   );
+}
+
+/**
+ * Sync system-level files (from system/) to all role directories.
+ * These are Agency-managed files that apply to all agents regardless of role.
+ */
+export function syncSystemFilesToRoles(): void {
+  const systemDir = join(process.cwd(), "system");
+  if (!existsSync(systemDir)) return;
+
+  const roles = listRoles();
+  const systemFiles = readdirSync(systemDir).filter((f) => f.endsWith(".md"));
+
+  for (const role of roles) {
+    const roleDir = join(process.cwd(), "roles", role);
+    mkdirSync(roleDir, { recursive: true });
+
+    for (const file of systemFiles) {
+      const src = join(systemDir, file);
+      const dest = join(roleDir, file);
+      try {
+        copyFileSync(src, dest);
+      } catch (err) {
+        console.error(`[sync-system] failed to copy ${file} to ${role}:`, err);
+      }
+    }
+  }
+
+  console.log(`[sync-system] synced ${systemFiles.length} system file(s) to ${roles.length} role(s)`);
+}
+
+function resolveIsLocal(machineName?: string | null): boolean {
+  if (!machineName) return true;
+  const machines = readMachines();
+  const machine = machines.find((m) => m.name === machineName);
+  return machine?.auth === "local" ?? true;
 }
