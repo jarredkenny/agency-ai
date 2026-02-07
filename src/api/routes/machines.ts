@@ -7,7 +7,7 @@ export interface Machine {
   host: string;
   user: string;
   port: number;
-  auth: "key" | "password";
+  auth: "local" | "key" | "password";
   ssh_key?: string;
   password?: string;
 }
@@ -55,6 +55,10 @@ machines.post("/", async (c) => {
   const list = readMachines();
   if (list.find((m) => m.name === body.name)) {
     return c.json({ error: "machine already exists" }, 409);
+  }
+
+  if (body.auth === "local" && list.some((m) => m.auth === "local")) {
+    return c.json({ error: "a local machine already exists" }, 409);
   }
 
   list.push({
