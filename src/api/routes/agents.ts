@@ -1,3 +1,5 @@
+import * as fs from "fs";
+import * as path from "path";
 import { Hono } from "hono";
 import { db } from "../db/client.js";
 import { resolveAgent } from "../lib/resolve-agent.js";
@@ -6,12 +8,8 @@ import {
   removeAgentFromFleet,
   readFleet,
 } from "../lib/fleet-sync.js";
-import { startLocal, stopLocal } from "../lib/processes.js";
-import { stopTunnel } from "../lib/tunnels.js";
-import { pushSkillsToAgent } from "../lib/sync-skills.js";
-import { deployRemote, stopRemote } from "../lib/remote-deploy.js";
-import { provisionAgent } from "../lib/provision-openclaw.js";
 import { listRoles, getRoleConfig } from "../lib/fs-store.js";
+import { getMetrics } from "../lib/metrics.js";
 
 const NAME_RE = /^[a-z][a-z0-9-]{1,30}$/;
 const VALID_LOCATIONS = new Set(["docker", "remote", "local"]);
@@ -25,6 +23,88 @@ const FILE_TO_CONFIG_TYPE: Record<string, string> = {
   "TOOLS.md": "tools",
 };
 
+/**
+ * Write a docker-compose.agents.yml with a service for the given agent.
+ * Merges into any existing services so multiple agents can coexist.
+ */
+export function generateAgentCompose(agentName: string): void {
+  const composePath = path.join(process.cwd(), "docker-compose.agents.yml");
+  const serviceName = `agent-${agentName}`;
+
+  // Parse existing compose file to preserve other agent services
+  let existing: { services: Record<string, Record<string, unknown>> } = { services: {} };
+  if (fs.existsSync(composePath)) {
+    try {
+      const raw = fs.readFileSync(composePath, "utf-8");
+      // Parse our simple YAML format: extract service blocks
+      let currentService = "";
+      let currentVolumes = false;
+      for (const line of raw.split("\n")) {
+        const svcMatch = line.match(/^  (agent-[\w-]+):$/);
+        if (svcMatch) {
+          currentService = svcMatch[1];
+          existing.services[currentService] = {};
+          currentVolumes = false;
+          continue;
+        }
+        if (currentService) {
+          const kvMatch = line.match(/^    (\w+): (.+)$/);
+          if (kvMatch) {
+            existing.services[currentService][kvMatch[1]] = kvMatch[2];
+            currentVolumes = false;
+            continue;
+          }
+          if (line.match(/^    volumes:$/)) {
+            currentVolumes = true;
+            existing.services[currentService].volumes = [];
+            continue;
+          }
+          if (currentVolumes) {
+            const volMatch = line.match(/^      - (.+)$/);
+            if (volMatch) {
+              (existing.services[currentService].volumes as string[]).push(volMatch[1]);
+            }
+          }
+        }
+      }
+    } catch {}
+  }
+
+  const service = {
+    image: "agency-agent",
+    container_name: serviceName,
+    restart: "unless-stopped",
+    extra_hosts: ["host.docker.internal:host-gateway"],
+    volumes: [`/root/.openclaw-${agentName}:/root/.openclaw-${agentName}`],
+  };
+
+  existing.services[serviceName] = service;
+
+  // Write as YAML manually (simple enough structure)
+  let yaml = "services:\n";
+  for (const [name, svc] of Object.entries(existing.services)) {
+    const s = svc as Record<string, unknown>;
+    yaml += `  ${name}:\n`;
+    yaml += `    image: ${s.image}\n`;
+    yaml += `    container_name: ${s.container_name}\n`;
+    yaml += `    restart: ${s.restart}\n`;
+    if (Array.isArray(s.extra_hosts) && s.extra_hosts.length > 0) {
+      yaml += `    extra_hosts:\n`;
+      for (const h of s.extra_hosts) {
+        yaml += `      - ${h}\n`;
+      }
+    }
+    if (Array.isArray(s.volumes) && s.volumes.length > 0) {
+      yaml += `    volumes:\n`;
+      for (const v of s.volumes) {
+        yaml += `      - ${v}\n`;
+      }
+    }
+  }
+
+  fs.writeFileSync(composePath, yaml);
+}
+
 export const agents = new Hono();
 
 // List available roles (from filesystem)
@@ -34,14 +114,14 @@ agents.get("/roles", async (c) => {
 
 agents.get("/", async (c) => {
   const rows = await db.selectFrom("agents").selectAll().execute();
-  // Enrich with fleet data (machine, skills)
   const fleet = readFleet();
+
   const enriched = rows.map((r) => {
     const fa = fleet.agents[r.name];
     return {
       ...r,
       machine: fa?.machine ?? null,
-      skills: fa?.skills ?? [],
+      metrics: getMetrics(r.name),
     };
   });
   return c.json(enriched);
@@ -52,10 +132,11 @@ agents.get("/:name", async (c) => {
   if (!agent) return c.json({ error: "not found" }, 404);
   const fleet = readFleet();
   const fa = fleet.agents[agent.name];
+
   return c.json({
     ...agent,
     machine: fa?.machine ?? null,
-    skills: fa?.skills ?? [],
+    metrics: getMetrics(agent.name),
   });
 });
 
@@ -154,7 +235,6 @@ agents.patch("/:name", async (c) => {
     role?: string;
     location?: string;
     machine?: string | null;
-    skills?: string[];
     slack_bot_token?: string | null;
     slack_app_token?: string | null;
   }>();
@@ -177,7 +257,7 @@ agents.patch("/:name", async (c) => {
 
   // Sync config fields to fleet.json
   if (body.role !== undefined || body.location !== undefined ||
-      body.machine !== undefined || body.skills !== undefined ||
+      body.machine !== undefined ||
       body.slack_bot_token !== undefined ||
       body.slack_app_token !== undefined) {
     const fleet = readFleet();
@@ -187,7 +267,6 @@ agents.patch("/:name", async (c) => {
       role: updated.role,
       location: updated.location ?? "local",
       ...(body.machine !== undefined ? { machine: body.machine ?? undefined } : {}),
-      ...(body.skills !== undefined ? { skills: body.skills } : {}),
       ...(updated.slack_bot_token ? { slackBotToken: updated.slack_bot_token } : {}),
       ...(updated.slack_app_token ? { slackAppToken: updated.slack_app_token } : {}),
     });
@@ -201,14 +280,16 @@ agents.delete("/:name", async (c) => {
   const agent = await resolveAgent(c.req.param("name"));
   if (!agent) return c.json({ error: "not found" }, 404);
 
-  // Stop docker container if running
-  if (agent.location === "docker") {
+  // Stop agent if running
+  if (agent.status === "active") {
     try {
-      const proc = Bun.spawn(
-        ["docker", "compose", "-f", "docker-compose.agents.yml", "stop", `agent-${agent.name}`],
-        { cwd: process.cwd(), stdout: "inherit", stderr: "inherit" }
-      );
-      await proc.exited;
+      const { stop } = await import("../lib/deploy.js");
+      await stop({
+        name: agent.name,
+        role: agent.role,
+        runtime: agent.runtime ?? "system",
+        machine: agent.machine ?? "",
+      });
     } catch {}
   }
 
@@ -223,61 +304,25 @@ agents.post("/:name/deploy", async (c) => {
   const agent = await resolveAgent(c.req.param("name"));
   if (!agent) return c.json({ error: "not found" }, 404);
 
-  // Provision OpenClaw config + auth before starting
   try {
-    await provisionAgent(agent.name, agent.role, agent.location ?? "local");
+    const { deploy } = await import("../lib/deploy.js");
+    const result = await deploy({
+      name: agent.name,
+      role: agent.role,
+      runtime: agent.runtime ?? "system",
+      machine: agent.machine ?? "",
+      slack_bot_token: agent.slack_bot_token,
+      slack_app_token: agent.slack_app_token,
+    });
+    await db
+      .updateTable("agents")
+      .where("id", "=", agent.id)
+      .set({ status: "active", updated_at: new Date().toISOString() })
+      .execute();
+    return c.json({ status: "deployed", method: result.method });
   } catch (err: any) {
-    return c.json({ error: `Provisioning failed: ${err.message}` }, 500);
+    return c.json({ error: err.message }, 500);
   }
-
-  if (agent.location === "local") {
-    await startLocal(agent.name, agent.role);
-    await db
-      .updateTable("agents")
-      .where("id", "=", agent.id)
-      .set({ status: "active", updated_at: new Date().toISOString() })
-      .execute();
-    return c.json({ status: "deployed", method: "local" });
-  }
-
-  if (agent.location === "remote") {
-    const fleet = readFleet();
-    const machine = fleet.agents[agent.name]?.machine;
-    try {
-      await deployRemote(agent.name, agent.role, machine);
-    } catch (err: any) {
-      return c.json({ error: `Remote deploy failed: ${err.message}` }, 500);
-    }
-
-    await db
-      .updateTable("agents")
-      .where("id", "=", agent.id)
-      .set({ status: "active", updated_at: new Date().toISOString() })
-      .execute();
-    return c.json({ status: "deployed", method: "remote", tunnel: true });
-  }
-
-  if (agent.location === "docker") {
-    const proc = Bun.spawn(
-      ["docker", "compose", "-f", "docker-compose.agents.yml", "up", "-d", `agent-${agent.name}`],
-      { cwd: process.cwd(), stdout: "inherit", stderr: "inherit" }
-    );
-    const exitCode = await proc.exited;
-    if (exitCode !== 0) {
-      return c.json({ error: "docker compose up failed" }, 500);
-    }
-    // Push config + auth into running container
-    const { pushToDocker } = await import("../lib/provision-openclaw.js");
-    await pushToDocker(agent.name, agent.role);
-    await db
-      .updateTable("agents")
-      .where("id", "=", agent.id)
-      .set({ status: "active", updated_at: new Date().toISOString() })
-      .execute();
-    return c.json({ status: "deployed", method: "docker" });
-  }
-
-  return c.json({ error: "unsupported location" }, 400);
 });
 
 // Stop agent
@@ -285,47 +330,21 @@ agents.post("/:name/stop", async (c) => {
   const agent = await resolveAgent(c.req.param("name"));
   if (!agent) return c.json({ error: "not found" }, 404);
 
-  if (agent.location === "local") {
-    const stopped = stopLocal(agent.name);
-    if (!stopped) {
-      return c.json({ error: "no local process found" }, 400);
-    }
+  try {
+    const { stop } = await import("../lib/deploy.js");
+    await stop({
+      name: agent.name,
+      role: agent.role,
+      runtime: agent.runtime ?? "system",
+      machine: agent.machine ?? "",
+    });
     await db
       .updateTable("agents")
       .where("id", "=", agent.id)
       .set({ status: "idle", updated_at: new Date().toISOString() })
       .execute();
     return c.json({ status: "stopped" });
+  } catch (err: any) {
+    return c.json({ error: err.message }, 500);
   }
-
-  if (agent.location === "docker") {
-    const proc = Bun.spawn(
-      ["docker", "compose", "-f", "docker-compose.agents.yml", "stop", `agent-${agent.name}`],
-      { cwd: process.cwd(), stdout: "inherit", stderr: "inherit" }
-    );
-    const exitCode = await proc.exited;
-    if (exitCode !== 0) {
-      return c.json({ error: "docker compose stop failed" }, 500);
-    }
-    await db
-      .updateTable("agents")
-      .where("id", "=", agent.id)
-      .set({ status: "idle", updated_at: new Date().toISOString() })
-      .execute();
-    return c.json({ status: "stopped" });
-  }
-
-  if (agent.location === "remote") {
-    const fleet = readFleet();
-    const machine = fleet.agents[agent.name]?.machine;
-    await stopRemote(agent.name, machine);
-    await db
-      .updateTable("agents")
-      .where("id", "=", agent.id)
-      .set({ status: "idle", updated_at: new Date().toISOString() })
-      .execute();
-    return c.json({ status: "stopped", tunnel: "closed" });
-  }
-
-  return c.json({ error: "stop not supported for this agent location" }, 400);
 });
