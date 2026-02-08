@@ -35,13 +35,22 @@ export default async function init(_args: string[]) {
     slackUserId = await ask("  ? Your Slack user ID");
   }
 
-  const workerRolesInput = await ask("? Add worker roles? (comma-separated names, or enter to skip)");
-  const workerRoles = workerRolesInput
-    ? workerRolesInput.split(",").map((r) => r.trim()).filter(Boolean)
-    : [];
+  const workerRolesInput = await ask("? Add agents? (role:name or name, comma-separated, e.g. 'implementer:bob,solo:ace')");
+  const workerAgents: { name: string; role: string }[] = [];
+  if (workerRolesInput) {
+    for (const entry of workerRolesInput.split(",").map((r) => r.trim()).filter(Boolean)) {
+      if (entry.includes(":")) {
+        const [role, name] = entry.split(":", 2);
+        workerAgents.push({ name: name.trim(), role: role.trim() });
+      } else {
+        // Default to implementer role if no role specified
+        workerAgents.push({ name: entry, role: "implementer" });
+      }
+    }
+  }
 
-  const allRoles = ["orchestrator", ...workerRoles.map(() => "implementer")];
-  const allRoleNames = [orchestratorName, ...workerRoles];
+  const allRoles = ["orchestrator", ...workerAgents.map((a) => a.role)];
+  const allRoleNames = [orchestratorName, ...workerAgents.map((a) => a.name)];
 
   // Create .agency directory
   console.log("\n  Creating .agency/ ...");
@@ -53,8 +62,8 @@ export default async function init(_args: string[]) {
       [orchestratorName]: { role: "orchestrator", runtime: "system", machine: machineName },
     },
   };
-  for (const worker of workerRoles) {
-    fleet.agents[worker] = { role: "implementer", runtime: "system", machine: machineName };
+  for (const agent of workerAgents) {
+    fleet.agents[agent.name] = { role: agent.role, runtime: "system", machine: machineName };
   }
   fs.writeFileSync(
     path.join(agencyDir, "fleet.json"),
@@ -99,8 +108,8 @@ export default async function init(_args: string[]) {
   }
 
   console.log(`  Creating orchestrator: ${orchestratorName} ...`);
-  for (const worker of workerRoles) {
-    console.log(`  Creating worker role: ${worker} ...`);
+  for (const agent of workerAgents) {
+    console.log(`  Creating agent: ${agent.name} (${agent.role}) ...`);
   }
 
   // Offer to install daemon
