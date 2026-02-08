@@ -152,11 +152,16 @@ export async function buildOpenClawJson(
 }
 
 /**
- * Build auth-profiles.json from main openclaw profile + DB credentials.
- * (Merged from provision-auth.ts)
+ * Build auth-profiles.json from available credential sources.
+ *
+ * Priority order:
+ *   1. DB settings (ai.oauth_access_token or ai.anthropic_api_key)
+ *   2. Claude Code credentials (~/.claude/.credentials.json)
+ *   3. OpenClaw profile (~/.openclaw/agents/main/agent/auth-profiles.json)
  */
 export async function buildAuthProfiles(): Promise<Record<string, unknown>> {
   const mainAuthPath = path.join(HOME, ".openclaw", "agents", "main", "agent", "auth-profiles.json");
+  const claudeCredentialsPath = path.join(HOME, ".claude", ".credentials.json");
 
   let authFile: {
     version: number;
@@ -184,6 +189,7 @@ export async function buildAuthProfiles(): Promise<Record<string, unknown>> {
   const authMethod = s["ai.auth_method"] || "api_key";
 
   if (authMethod === "oauth" && s["ai.oauth_access_token"]) {
+    // Source 1a: DB OAuth token
     authFile.profiles["anthropic:agency"] = {
       type: "token",
       provider: "anthropic",
@@ -193,6 +199,7 @@ export async function buildAuthProfiles(): Promise<Record<string, unknown>> {
       authFile.lastGood["anthropic"] = "anthropic:agency";
     }
   } else if (s["ai.anthropic_api_key"]) {
+    // Source 1b: DB API key
     authFile.profiles["anthropic:agency"] = {
       type: "token",
       provider: "anthropic",
@@ -203,8 +210,32 @@ export async function buildAuthProfiles(): Promise<Record<string, unknown>> {
     }
   }
 
+  // Source 2: Claude Code OAuth credentials (~/.claude/.credentials.json)
+  if (Object.keys(authFile.profiles).length === 0 && fs.existsSync(claudeCredentialsPath)) {
+    try {
+      const creds = JSON.parse(fs.readFileSync(claudeCredentialsPath, "utf-8"));
+      const oauth = creds.claudeAiOauth;
+      if (oauth?.accessToken) {
+        authFile.profiles["anthropic:claude-code"] = {
+          type: "token",
+          provider: "anthropic",
+          token: oauth.accessToken,
+        };
+        authFile.lastGood["anthropic"] = "anthropic:claude-code";
+        console.log("[provision] using Claude Code OAuth credentials from ~/.claude/.credentials.json");
+      }
+    } catch {
+      // ignore parse errors
+    }
+  }
+
   if (Object.keys(authFile.profiles).length === 0) {
-    throw new Error("No auth credentials available. Configure in Settings → AI or run 'openclaw configure'.");
+    throw new Error(
+      "No auth credentials available. Either:\n" +
+      "  - Configure in Settings → AI (API key or OAuth)\n" +
+      "  - Log in with Claude Code: claude login\n" +
+      "  - Run: openclaw configure"
+    );
   }
 
   return authFile;
