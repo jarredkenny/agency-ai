@@ -1,6 +1,7 @@
 import * as fs from "fs";
 import * as path from "path";
 import { db } from "../db/client.js";
+import { readFleet } from "./fleet-sync.js";
 
 const HOME = process.env.HOME ?? "";
 const ROLES_DIR = path.join(process.cwd(), "roles");
@@ -99,7 +100,18 @@ export async function buildOpenClawJson(
     if (slackTokens.appToken) slack.appToken = slackTokens.appToken;
     if (!slack.mode) slack.mode = "socket";
     if (!slack.enabled) slack.enabled = true;
-    if (slack.dm === undefined) slack.dm = { enabled: true, policy: "allowlist" };
+
+    // Wire DM allowlist from fleet config
+    if (slack.dm === undefined) {
+      const fleet = readFleet();
+      const dmAllowFrom = fleet.slack?.dmAllowFrom ?? [];
+      slack.dm = {
+        enabled: true,
+        policy: dmAllowFrom.length ? "allowlist" : "open",
+        ...(dmAllowFrom.length ? { allowFrom: dmAllowFrom } : {}),
+      };
+    }
+
     channels.slack = slack;
   }
 
@@ -291,6 +303,21 @@ export async function provisionAgent(
   runtime: string = "system",
   slackTokens?: { botToken?: string; appToken?: string },
 ): Promise<{ configPath: string; authPath: string }> {
+  // If no slack tokens passed, look them up from the DB
+  if (!slackTokens) {
+    const agent = await db
+      .selectFrom("agents")
+      .select(["slack_bot_token", "slack_app_token"])
+      .where("name", "=", agentName)
+      .executeTakeFirst();
+    if (agent?.slack_bot_token || agent?.slack_app_token) {
+      slackTokens = {
+        botToken: agent.slack_bot_token ?? undefined,
+        appToken: agent.slack_app_token ?? undefined,
+      };
+    }
+  }
+
   const profileDir = path.join(HOME, `.openclaw-${agentName}`);
   const configPath = path.join(profileDir, "openclaw.json");
   const authDir = path.join(profileDir, "agents", "main", "agent");

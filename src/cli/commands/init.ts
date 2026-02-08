@@ -74,7 +74,19 @@ export default async function init(_args: string[]) {
   // Create fleet.json
   const fleet: any = { agents: {} };
   for (const agent of agents) {
-    fleet.agents[agent.name] = { role: agent.role, runtime: "system", machine: machineName };
+    fleet.agents[agent.name] = {
+      role: agent.role,
+      runtime: "system",
+      machine: machineName,
+      ...(slackBotToken ? { slackBotToken } : {}),
+      ...(slackAppToken ? { slackAppToken } : {}),
+    };
+  }
+  if (doSlack) {
+    fleet.slack = {
+      ...(slackChannel ? { channel: slackChannel } : {}),
+      ...(slackUserId ? { dmAllowFrom: [slackUserId] } : {}),
+    };
   }
   fs.writeFileSync(
     path.join(agencyDir, "fleet.json"),
@@ -105,18 +117,6 @@ export default async function init(_args: string[]) {
     teamName,
     roles: allRoles,
   });
-
-  // Store Slack settings if provided
-  if (doSlack) {
-    const { db } = await import("../../api/db/client.js");
-    const slackSettings = [
-      { key: "slack.team_channel", value: slackChannel },
-      { key: "slack.human_user_id", value: slackUserId },
-    ];
-    for (const s of slackSettings) {
-      await db.updateTable("settings").where("key", "=", s.key).set({ value: s.value, updated_at: new Date().toISOString() }).execute();
-    }
-  }
 
   for (const agent of agents) {
     console.log(`  Creating agent: ${agent.name} (${agent.role}) ...`);

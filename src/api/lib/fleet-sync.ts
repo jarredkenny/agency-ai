@@ -43,6 +43,7 @@ interface FleetAgent {
 
 interface Fleet {
   agents: Record<string, FleetAgent>;
+  slack?: { channel?: string; dmAllowFrom?: string[] };
   [key: string]: any;
 }
 
