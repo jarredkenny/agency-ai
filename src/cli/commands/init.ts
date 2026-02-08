@@ -18,7 +18,13 @@ export default async function init(_args: string[]) {
 
   const userName = await ask("? Your name", "Human");
   const teamName = await ask("? Team name", "My Team");
-  const orchestratorName = await ask("? Orchestrator agent name", "sonny");
+
+  // Choose setup mode
+  console.log("\n  Setup modes:");
+  console.log("    1) Solo — Single agent that plans and executes (simplest)");
+  console.log("    2) Team — Orchestrator + worker agents (multi-agent)\n");
+  const modeInput = await ask("? Setup mode", "1");
+  const soloMode = modeInput !== "2";
 
   const os = await import("os");
   const machineName = await ask("? Machine name for this host", os.hostname());
@@ -35,34 +41,39 @@ export default async function init(_args: string[]) {
     slackUserId = await ask("  ? Your Slack user ID");
   }
 
-  const workerRolesInput = await ask("? Add agents? (role:name or name, comma-separated, e.g. 'implementer:bob,solo:ace')");
-  const workerAgents: { name: string; role: string }[] = [];
-  if (workerRolesInput) {
-    for (const entry of workerRolesInput.split(",").map((r) => r.trim()).filter(Boolean)) {
-      if (entry.includes(":")) {
-        const [role, name] = entry.split(":", 2);
-        workerAgents.push({ name: name.trim(), role: role.trim() });
-      } else {
-        // Default to implementer role if no role specified
-        workerAgents.push({ name: entry, role: "implementer" });
+  // Build agent list based on mode
+  const agents: { name: string; role: string }[] = [];
+
+  if (soloMode) {
+    const agentName = await ask("? Agent name", "sonny");
+    agents.push({ name: agentName, role: "solo" });
+  } else {
+    const orchestratorName = await ask("? Orchestrator agent name", "sonny");
+    agents.push({ name: orchestratorName, role: "orchestrator" });
+
+    const workerRolesInput = await ask("? Add agents? (role:name or name, comma-separated, e.g. 'implementer:bob,solo:ace')");
+    if (workerRolesInput) {
+      for (const entry of workerRolesInput.split(",").map((r) => r.trim()).filter(Boolean)) {
+        if (entry.includes(":")) {
+          const [role, name] = entry.split(":", 2);
+          agents.push({ name: name.trim(), role: role.trim() });
+        } else {
+          // Default to implementer role if no role specified
+          agents.push({ name: entry, role: "implementer" });
+        }
       }
     }
   }
 
-  const allRoles = ["orchestrator", ...workerAgents.map((a) => a.role)];
-  const allRoleNames = [orchestratorName, ...workerAgents.map((a) => a.name)];
+  const allRoles = [...new Set(agents.map((a) => a.role))];
 
   // Create .agency directory
   console.log("\n  Creating .agency/ ...");
   fs.mkdirSync(agencyDir, { recursive: true });
 
   // Create fleet.json
-  const fleet: any = {
-    agents: {
-      [orchestratorName]: { role: "orchestrator", runtime: "system", machine: machineName },
-    },
-  };
-  for (const agent of workerAgents) {
+  const fleet: any = { agents: {} };
+  for (const agent of agents) {
     fleet.agents[agent.name] = { role: agent.role, runtime: "system", machine: machineName };
   }
   fs.writeFileSync(
@@ -92,7 +103,7 @@ export default async function init(_args: string[]) {
   await seedDefaults({
     userName,
     teamName,
-    roles: [...new Set(allRoles)],
+    roles: allRoles,
   });
 
   // Store Slack settings if provided
@@ -107,8 +118,7 @@ export default async function init(_args: string[]) {
     }
   }
 
-  console.log(`  Creating orchestrator: ${orchestratorName} ...`);
-  for (const agent of workerAgents) {
+  for (const agent of agents) {
     console.log(`  Creating agent: ${agent.name} (${agent.role}) ...`);
   }
 
