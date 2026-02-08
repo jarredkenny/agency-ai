@@ -1,0 +1,205 @@
+#!/bin/bash
+CONFIG_DIR="$HOME/.config/spotify-api"
+CREDS="$CONFIG_DIR/credentials.json"
+TOKENS="$CONFIG_DIR/tokens.json"
+
+get_token() {
+  cat "$TOKENS" | jq -r '.access_token'
+}
+
+refresh_token() {
+  local refresh=$(cat "$TOKENS" | jq -r '.refresh_token')
+  local client_id=$(cat "$CREDS" | jq -r '.client_id')
+  local client_secret=$(cat "$CREDS" | jq -r '.client_secret')
+  
+  curl -s -X POST "https://accounts.spotify.com/api/token" \
+    -H "Content-Type: application/x-www-form-urlencoded" \
+    -d "grant_type=refresh_token" \
+    -d "refresh_token=$refresh" \
+    -d "client_id=$client_id" \
+    -d "client_secret=$client_secret" > /tmp/new_tokens.json
+  
+  # Keep the refresh token if not returned
+  local new_refresh=$(cat /tmp/new_tokens.json | jq -r '.refresh_token // empty')
+  if [ -z "$new_refresh" ]; then
+    cat /tmp/new_tokens.json | jq --arg rt "$refresh" '. + {refresh_token: $rt}' > "$TOKENS"
+  else
+    mv /tmp/new_tokens.json "$TOKENS"
+  fi
+  chmod 600 "$TOKENS"
+}
+
+api() {
+  local method=$1
+  local endpoint=$2
+  shift 2
+  local token=$(get_token)
+  local response=$(curl -s -w "\n%{http_code}" -X "$method" "https://api.spotify.com/v1$endpoint" \
+    -H "Authorization: Bearer $token" \
+    -H "Content-Type: application/json" "$@")
+  local code=$(echo "$response" | tail -1)
+  local body=$(echo "$response" | sed '$d')
+  
+  if [ "$code" = "401" ]; then
+    refresh_token
+    token=$(get_token)
+    response=$(curl -s -X "$method" "https://api.spotify.com/v1$endpoint" \
+      -H "Authorization: Bearer $token" \
+      -H "Content-Type: application/json" "$@")
+    echo "$response"
+  else
+    echo "$body"
+  fi
+}
+
+parse_device_arg() {
+  # Parse --device argument from remaining args
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --device) echo "$2"; return ;;
+      *) shift ;;
+    esac
+  done
+}
+
+case "$1" in
+  devices)
+    api GET "/me/player/devices" | jq -r '.devices[] | "\(.name) (\(.type)) - \(.id)"'
+    ;;
+  play)
+    shift
+    uri="$1"
+    shift
+    device=$(parse_device_arg "$@")
+    device_param=""
+    [ -n "$device" ] && device_param="?device_id=$device"
+    
+    if [ -n "$uri" ]; then
+      # Check if it's a context (album/playlist) or track
+      if [[ "$uri" == spotify:album:* ]] || [[ "$uri" == spotify:playlist:* ]] || [[ "$uri" == spotify:artist:* ]]; then
+        api PUT "/me/player/play$device_param" -d "{\"context_uri\":\"$uri\"}"
+      else
+        api PUT "/me/player/play$device_param" -d "{\"uris\":[\"$uri\"]}"
+      fi
+    else
+      api PUT "/me/player/play$device_param"
+    fi
+    ;;
+  queue)
+    shift
+    uri="$1"
+    shift
+    device=$(parse_device_arg "$@")
+    device_param=""
+    [ -n "$device" ] && device_param="&device_id=$device"
+    
+    if [ -z "$uri" ]; then
+      echo "Usage: spotify-ctl queue <uri> [--device <device_id>]"
+      echo "       Supports track, album, or playlist URIs"
+      exit 1
+    fi
+    
+    # Handle albums - fetch tracks and queue each
+    if [[ "$uri" == spotify:album:* ]]; then
+      album_id="${uri#spotify:album:}"
+      tracks=$(api GET "/albums/$album_id/tracks?limit=50" | jq -r '.items[].uri')
+      for track in $tracks; do
+        api POST "/me/player/queue?uri=$track$device_param" > /dev/null
+      done
+      echo "Queued album ($(echo "$tracks" | wc -l) tracks)"
+    # Handle playlists - fetch tracks and queue each
+    elif [[ "$uri" == spotify:playlist:* ]]; then
+      playlist_id="${uri#spotify:playlist:}"
+      tracks=$(api GET "/playlists/$playlist_id/tracks?limit=50" | jq -r '.items[].track.uri')
+      for track in $tracks; do
+        api POST "/me/player/queue?uri=$track$device_param" > /dev/null
+      done
+      echo "Queued playlist ($(echo "$tracks" | wc -l) tracks)"
+    else
+      api POST "/me/player/queue?uri=$uri$device_param"
+    fi
+    ;;
+  pause)
+    api PUT "/me/player/pause"
+    ;;
+  next)
+    api POST "/me/player/next"
+    ;;
+  prev)
+    api POST "/me/player/previous"
+    ;;
+  status)
+    api GET "/me/player/currently-playing" | jq -r 'if .item then "\(.item.artists[0].name) - \(.item.name)" else "Nothing playing" end'
+    ;;
+  search)
+    shift
+    # Parse --type and --limit args
+    search_type="track"
+    limit=5
+    query_parts=()
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --type) search_type="$2"; shift 2 ;;
+        --limit) limit="$2"; shift 2 ;;
+        *) query_parts+=("$1"); shift ;;
+      esac
+    done
+    query=$(printf '%s ' "${query_parts[@]}" | sed 's/ *$//' | sed 's/ /%20/g')
+    
+    case "$search_type" in
+      album)
+        api GET "/search?q=$query&type=album&limit=$limit" | jq -r '.albums.items[] | "\(.artists[0].name) - \(.name) | \(.uri)"'
+        ;;
+      artist)
+        api GET "/search?q=$query&type=artist&limit=$limit" | jq -r '.artists.items[] | "\(.name) | \(.uri)"'
+        ;;
+      playlist)
+        api GET "/search?q=$query&type=playlist&limit=$limit" | jq -r '.playlists.items[] | "\(.name) by \(.owner.display_name) | \(.uri)"'
+        ;;
+      *)
+        api GET "/search?q=$query&type=track&limit=$limit" | jq -r '.tracks.items[] | "\(.artists[0].name) - \(.name) | \(.uri)"'
+        ;;
+    esac
+    ;;
+  transfer)
+    device_id=$2
+    api PUT "/me/player" -d "{\"device_ids\":[\"$device_id\"],\"play\":true}"
+    ;;
+  clear-queue)
+    # Spotify has no "clear queue" endpoint. Workaround: read queue, skip through all queued tracks.
+    queue_json=$(api GET "/me/player/queue")
+    count=$(echo "$queue_json" | jq -r '.queue | length')
+    if [ "$count" = "0" ] || [ "$count" = "null" ]; then
+      echo "Queue is already empty"
+    else
+      echo "Clearing $count queued tracks..."
+      for ((i=0; i<count; i++)); do
+        api POST "/me/player/next" > /dev/null
+        sleep 0.15
+      done
+      # Go back to what was originally playing (now it's the last skipped track)
+      # Actually we want to just stop at wherever we land — the queue is clear
+      echo "Queue cleared ($count tracks skipped)"
+    fi
+    ;;
+  volume)
+    api PUT "/me/player/volume?volume_percent=$2"
+    ;;
+  *)
+    echo "Usage: spotify-ctl <command> [options]"
+    echo ""
+    echo "Commands:"
+    echo "  devices                      List available devices"
+    echo "  play [uri] [--device id]     Play (optionally: track/album/playlist URI)"
+    echo "  queue <uri> [--device id]    Add track to queue"
+    echo "  pause                        Pause playback"
+    echo "  next                         Skip to next track"
+    echo "  prev                         Previous track"
+    echo "  status                       Current track info"
+    echo "  search <query> [--type TYPE] [--limit N]"
+    echo "                               Search (type: track|album|artist|playlist)"
+    echo "  transfer <device_id>         Transfer playback to device"
+    echo "  clear-queue                  Clear the playback queue"
+    echo "  volume <0-100>               Set volume"
+    ;;
+esac
